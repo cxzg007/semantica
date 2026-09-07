@@ -386,6 +386,13 @@ class PolicyEngine:
             
         Returns:
             True if the decision complies with the policy, False otherwise.
+            A returned ``False`` always means "evaluated and found
+            non-compliant" - including the case where the decision simply
+            lacks the evidence a rule needs (e.g. a metadata field targeted
+            by a ``min_``/``max_``/``required_`` rule is absent): absent
+            evidence is non-compliance by policy. Only a rule that cannot
+            be executed at all counts as "could not determine compliance"
+            (see ``ProcessingError`` below).
 
         Raises:
             ValueError: If the policy cannot be found.

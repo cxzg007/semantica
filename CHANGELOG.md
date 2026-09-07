@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`PolicyEngine.check_compliance` now raises `ProcessingError` for rules it cannot evaluate** (#1160, fixes #1159) by @cxzg007
+  - `check_compliance` previously swallowed evaluation failures and returned `False`, making an unevaluable rule — a `min_confidence` of `"high"` compared against a numeric confidence, an unhashable rule value, a policy loading error — indistinguishable from a policy violation. A rule that cannot be executed now raises `ProcessingError` from `semantica.utils.exceptions`, while `False` keeps its meaning of "evaluated and found non-compliant", including the case where the decision simply lacks the evidence a rule needs (absent metadata is non-compliance by policy)
+  - `False` continues to mean "evaluated and found non-compliant"; callers acting on a genuine non-compliant verdict are unaffected. Callers that previously received `False` as a silent stand-in for an operational failure (e.g. a graph-store error or malformed rule value) will now receive `ProcessingError` instead — wrap the call in `try/except ProcessingError` to handle that case separately, as documented in `docs/guides/policy-engine.md`
+  - `docs/guides/policy-engine.md` and `docs/guides/decision-intelligence.md` document the contract, and the `check_compliance` docstring states the design boundary between the two failure modes
+
 ### Added
 
 - **Pluggable, persistent backend for `ExtractionCache`** (#1581) by @Besokus
@@ -308,11 +315,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Agno's `AgnoKnowledgeGraph.load_urls()` made outbound requests with no SSRF protection beyond a scheme check** (#1212) by @Sameer6305 — caller-supplied URLs went straight to `urllib.request.urlopen()`, unguarded against loopback/private addresses, cloud metadata endpoints (`169.254.169.254`), IPv6-internal addresses, hostnames resolving to private space, or redirects into any of the above. Found during a project-wide SSRF audit following #936/#959. Now routed through the shared `request_with_ssrf_guard()`; an unsafe URL is skipped rather than aborting the rest of the ingestion batch. `OpenClawKGTool` (operator-configured, intentionally allowed to target `localhost` for local deployments) gains scheme/malformed-URL validation as defense in depth, without restricting its legitimate private-network use case. 29 new Agno tests, 26 new OpenClaw tests, all passing alongside the 15 pre-existing Agno integration tests
-
-### Dependencies
-
-- Routine version bumps with no application-facing behavior change: `anthropic` 0.121.0→0.122.0 (#1045), `botocore` 1.43.69→1.43.73 (#1047), `agno` 2.8.7→2.9.0 (#1050), `google-genai` 2.17.0→2.18.1→2.19.0 (#1163, #1205), `lxml` 6.1.1→6.1.2 (#1197), `charset-normalizer` 3.5.0→3.5.1 (#1201), `pypickle` 2.0.1→2.0.2 (#1203)
 
 ## [0.6.6] - 2026-08-20
 
