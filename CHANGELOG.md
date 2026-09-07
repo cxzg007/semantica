@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`PolicyEngine.check_compliance` now raises `ProcessingError` for rules it cannot evaluate** (#1160, fixes #1159) by @cxzg007
+  - `check_compliance` previously swallowed evaluation failures and returned `False`, making an unevaluable rule — a `min_confidence` of `"high"` compared against a numeric confidence, an unhashable rule value, a policy loading error — indistinguishable from a policy violation. A rule that cannot be executed now raises `ProcessingError` from `semantica.utils.exceptions`, while `False` keeps its meaning of "evaluated and found non-compliant", including the case where the decision simply lacks the evidence a rule needs (absent metadata is non-compliance by policy)
+  - Callers that treat `False` as "block the decision" keep working unchanged; callers that need to distinguish "could not determine compliance" from "non-compliant" can now wrap the call in `try/except ProcessingError`, as documented in `docs/guides/policy-engine.md`
+  - `docs/guides/policy-engine.md` and `docs/guides/decision-intelligence.md` document the contract, and the `check_compliance` docstring states the design boundary between the two failure modes
+
 ## [0.6.6] - 2026-08-20
 
 ### Added
