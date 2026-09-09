@@ -163,6 +163,18 @@ def test_fixed_arity():
         session.apply(assertions=[FactSupport("t", "A(a, b)")])
 
 
+def test_asserted_predicate_arity_persists_across_batches():
+    # Predicates first introduced by an assertion must keep that arity for
+    # the session lifetime; a later batch cannot widen or narrow it.
+    session = TruthMaintenanceSession(rules=[])
+    session.apply(assertions=[FactSupport("s1", "Q(alice)")])
+    with pytest.raises(ValidationError):
+        session.apply(assertions=[FactSupport("s2", "Q(alice, bob)")])
+    # Same-arity re-assertion of the already-registered predicate is fine.
+    session.apply(assertions=[FactSupport("s3", "Q(bob)")])
+    assert session.facts == frozenset({"Q(alice)", "Q(bob)"})
+
+
 def test_rule_feature_restrictions():
     with pytest.raises(ValidationError):
         TruthMaintenanceSession(rules=[

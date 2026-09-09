@@ -12,7 +12,7 @@ assertions/retractions of :class:`FactSupport` entries.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 from ..utils.exceptions import ProcessingError, ValidationError
 from ._truth_maintenance_validation import (
@@ -49,7 +49,6 @@ class _SessionState:
         "arities",
         "derivations",
         "derivations_by_conclusion",
-        "derivations_by_premise",
         "derivations_by_rule",
         "facts_by_pred",
         "support_catalog",
@@ -64,7 +63,6 @@ class _SessionState:
         self.facts_by_pred: Dict[str, Set[str]] = {}
         self.derivations: Dict[DerivationKey, Derivation] = {}
         self.derivations_by_rule: Dict[str, Set[DerivationKey]] = {}
-        self.derivations_by_premise: Dict[str, Set[DerivationKey]] = {}
         self.derivations_by_conclusion: Dict[str, Set[DerivationKey]] = {}
         self.arities: Dict[str, int] = {}
 
@@ -82,9 +80,6 @@ class _SessionState:
         clone.derivations = dict(self.derivations)
         clone.derivations_by_rule = {
             rid: set(keys) for rid, keys in self.derivations_by_rule.items()
-        }
-        clone.derivations_by_premise = {
-            fact: set(keys) for fact, keys in self.derivations_by_premise.items()
         }
         clone.derivations_by_conclusion = {
             fact: set(keys) for fact, keys in self.derivations_by_conclusion.items()
@@ -129,8 +124,6 @@ class _SessionState:
         )
         self.derivations[key] = derivation
         self.derivations_by_rule.setdefault(derivation.rule_id, set()).add(key)
-        for premise in derivation.premises:
-            self.derivations_by_premise.setdefault(premise, set()).add(key)
         self.derivations_by_conclusion.setdefault(
             derivation.conclusion, set()
         ).add(key)
@@ -141,12 +134,6 @@ class _SessionState:
         for key in list(self.derivations_by_rule.get(rule_id, ())):
             derivation = self.derivations.pop(key)
             self.derivations_by_rule[rule_id].discard(key)
-            for premise in derivation.premises:
-                bucket = self.derivations_by_premise.get(premise)
-                if bucket is not None:
-                    bucket.discard(key)
-                    if not bucket:
-                        del self.derivations_by_premise[premise]
             bucket = self.derivations_by_conclusion.get(derivation.conclusion)
             if bucket is not None:
                 bucket.discard(key)
@@ -167,8 +154,8 @@ class TruthMaintenanceSession:
     session (including support-id assignments) untouched.
     """
 
-    def __init__(self, *, rules: Optional[Iterable[Rule]] = None) -> None:
-        snapshots, arities = build_rule_snapshots(rules or ())
+    def __init__(self, *, rules: Iterable[Rule]) -> None:
+        snapshots, arities = build_rule_snapshots(rules)
         self._rules: List[_RuleSnapshot] = snapshots
         self._state = _SessionState()
         self._state.arities = dict(arities)
@@ -195,9 +182,8 @@ class TruthMaintenanceSession:
         support_ids = tuple(sorted(state.supports_by_fact.get(canonical, ())))
         derivations = sorted(
             (
-                derivation
-                for key, derivation in state.derivations.items()
-                if key in state.derivations_by_conclusion.get(canonical, ())
+                state.derivations[key]
+                for key in state.derivations_by_conclusion.get(canonical, ())
             ),
             key=lambda item: (item.rule_id, item.premises, item.bindings),
         )
@@ -220,7 +206,7 @@ class TruthMaintenanceSession:
         try:
             assertion_items = _coerce_support_iterable(assertions)
             retraction_items = _coerce_id_iterable(retractions)
-            effective_assertions = self._validate_assertions(
+            effective_assertions, new_arities = self._validate_assertions(
                 assertion_items, retraction_items
             )
         except ValidationError:
@@ -244,6 +230,7 @@ class TruthMaintenanceSession:
             affected: Set[str] = set()
             self._remove_retracted(candidate, effective_retractions, affected)
             self._assert_supports(candidate, effective_assertions, affected)
+            candidate.arities.update(new_arities)
             self._rematch_dirty_rules(candidate, affected)
         except Exception as exc:
             raise ProcessingError(
@@ -257,7 +244,7 @@ class TruthMaintenanceSession:
 
     def _validate_assertions(
         self, assertion_items: List[FactSupport], retraction_items: List[str]
-    ) -> List[Tuple[str, str]]:
+    ) -> Tuple[List[Tuple[str, str]], Dict[str, int]]:
         state = self._state
         batch_arities = dict(state.arities)
         seen: Dict[str, str] = {}
@@ -310,7 +297,15 @@ class TruthMaintenanceSession:
                     "conflicting_ids": tuple(sorted(overlap)),
                 },
             )
-        return effective
+        # Predicates first observed in this batch: their arities must be
+        # persisted with the commit, otherwise a later batch could re-assert
+        # the same predicate with a different arity.
+        new_arities = {
+            predicate: arity
+            for predicate, arity in batch_arities.items()
+            if predicate not in state.arities
+        }
+        return effective, new_arities
 
     # -- staged mutation on the candidate state ----------------------------
 
@@ -377,9 +372,18 @@ class TruthMaintenanceSession:
     def _match_rule(
         self, snapshot: _RuleSnapshot, facts: _SessionState
     ) -> List[Tuple[Tuple[str, ...], Tuple[Tuple[str, str], ...], str]]:
-        """Matcher seam: single delegation point to the pure matching helper.
+        """Matcher seam: single delegation point for rule snapshot matching.
 
-        Exists only to isolate matching responsibility and to give tests a
+        Delegates to the module-level ``_match_snapshot`` helper, which
+        enumerates matches against the candidate state's predicate-indexed
+        facts and filters facts whose term count differs from the pattern's
+        (term-level arity check). It intentionally does not call
+        ``_rule_matching.match_rule``: that helper matches against a flat
+        fact iterable, and its regex-based matcher would accept cross-arity
+        matches such as ``Q(?x)`` against ``Q(a, b)``. The two matchers are
+        kept semantically aligned by the parity and differential tests.
+
+        Exists to isolate matching responsibility and to give tests a
         fault-injection and call-counting site; not part of the public API.
         """
         return _match_snapshot(snapshot, facts)
