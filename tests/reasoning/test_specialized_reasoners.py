@@ -548,5 +548,118 @@ class TestExecuteQueryReviewFixes(unittest.TestCase):
         self.assertNotIn("inferred_triples", result.metadata)
 
 
+    def test_execute_query_does_not_extend_non_type_triples(self):
+        """is_a materialization only fires on rdf:type triples: a
+        non-type relation whose object shares the class local name must
+        not be rewritten to the superclass (Codex)."""
+        reasoner = SPARQLReasoner(
+            triplet_store=self._store(
+                [
+                    self._triplet(
+                        "urn:alice", self.RDF_TYPE, "http://example.org/Employee"
+                    ),
+                    self._triplet(
+                        "urn:alice", "urn:role", "http://example.org/Employee"
+                    ),
+                ]
+            ),
+            enable_inference=True,
+        )
+        reasoner.add_inference_rule("IF ?x is_a Employee THEN ?x is_a Person")
+
+        result = reasoner.execute_query("SELECT ?s ?o WHERE { ?s <urn:role> ?o }")
+
+        self.assertEqual(
+            result.bindings, [{"s": "urn:alice", "o": "http://example.org/Employee"}]
+        )
+        # Only the rdf:type triple was extended, not the urn:role relation.
+        self.assertEqual(result.metadata.get("inferred_triples"), 1)
+
+    def test_execute_query_non_type_triples_do_not_satisfy_class_patterns(self):
+        """A relation like ``:alice :role :Employee`` must not make
+        ``?s a :Person`` match: class patterns only answer through
+        rdf:type triples."""
+        reasoner = SPARQLReasoner(
+            triplet_store=self._store(
+                [
+                    self._triplet(
+                        "urn:alice", "urn:role", "http://example.org/Employee"
+                    )
+                ]
+            ),
+            enable_inference=True,
+        )
+        reasoner.add_inference_rule("IF ?x is_a Employee THEN ?x is_a Person")
+
+        result = reasoner.execute_query(
+            "SELECT ?s WHERE { ?s a <http://example.org/Person> }"
+        )
+
+        self.assertEqual(result.bindings, [])
+
+    def test_execute_query_native_path_materializes_inference_first(self):
+        """Native backends cannot see rules that were never stored: when
+        materializable is_a rules are enabled, the query runs on the
+        in-memory graph so inferred answers are not missed (Codex)."""
+
+        test_case = self
+
+        class NativeStore:
+            def get_triplets(self):
+                return [
+                    test_case._triplet(
+                        "urn:alice", test_case.RDF_TYPE, "http://example.org/Employee"
+                    )
+                ]
+
+            def execute_query(self, query, **options):
+                # The backend has no inferred triples stored: without
+                # the fix this (empty) native result is what callers see.
+                return {"bindings": [], "variables": ["s"]}
+
+        reasoner = SPARQLReasoner(
+            triplet_store=NativeStore(), enable_inference=True
+        )
+        reasoner.add_inference_rule("IF ?x is_a Employee THEN ?x is_a Person")
+
+        result = reasoner.execute_query(
+            "SELECT ?s WHERE { ?s a <http://example.org/Person> }"
+        )
+
+        self.assertEqual(result.bindings, [{"s": "urn:alice"}])
+        self.assertEqual(result.metadata.get("executed_via"), "rdflib_in_memory")
+        self.assertEqual(result.metadata.get("inferred_triples"), 1)
+
+    def test_execute_query_keeps_native_path_when_rules_not_materializable(self):
+        """Stores with native execution keep it when the enabled rules
+        cannot be materialized (those rules only ever ran at the result
+        level)."""
+
+        class NativeStore:
+            def __init__(self):
+                self.received = None
+
+            def get_triplets(self):
+                return []
+
+            def execute_query(self, query, **options):
+                self.received = (query, options)
+                return {"bindings": [{"x": "John"}], "variables": ["x"]}
+
+        store = NativeStore()
+        reasoner = SPARQLReasoner(triplet_store=store, enable_inference=True)
+        reasoner.add_inference_rule("IF ?x worksAt ACME THEN ?x is_a Employee")
+
+        result = reasoner.execute_query("SELECT ?x WHERE { ?x a :Person }")
+
+        # The native result is kept and the non-materializable rule still
+        # applies at the result level (adding the x_type annotation row).
+        self.assertEqual(
+            result.bindings, [{"x": "John"}, {"x": "John", "x_type": "Employee"}]
+        )
+        self.assertEqual(store.received[0], "SELECT ?x WHERE { ?x a :Person }")
+
+
 if __name__ == "__main__":
+
     unittest.main()

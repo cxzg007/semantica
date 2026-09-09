@@ -386,9 +386,13 @@ class SPARQLReasoner:
         comments and ``=>`` pseudo-patterns that no SPARQL engine can
         parse. Inference still runs without rewriting the query:
 
-        * on the rdflib fallback path, ``is_a`` rules are materialized
-          into the in-memory graph *before* the query executes, so
-          inferred triples participate in pattern matching;
+        * ``is_a`` rules are materialized into an in-memory rdflib
+          graph *before* the query executes, so inferred triples
+          participate in pattern matching. This holds on the fallback
+          path, and also on the native path whenever materializable
+          rules are enabled: a native backend executes the original
+          query text and cannot see rules that were never materialized
+          into it, so the query is routed through the in-memory graph;
         * afterwards, ``infer_results()`` applies the rules to the
           *results* as well (rules that could not be materialized are
           covered by this step).
@@ -397,9 +401,11 @@ class SPARQLReasoner:
             query: SPARQL query string
             **options: Additional options forwarded to the triplet
                 store (e.g. ``graph``, ``graphs``). They only apply
-                on the native execution path; the rdflib fallback
-                always queries the full triplet set (a warning is
-                logged when options are dropped).
+                on the native execution path; the in-memory rdflib
+                path (the fallback, or the native path when
+                materializable inference rules force it) always queries
+                the full triplet set (a warning is logged when options
+                are dropped).
 
         Returns:
             SPARQLQueryResult with bindings and variables
@@ -526,6 +532,26 @@ class SPARQLReasoner:
         )
 
         if callable(execute) and not backend_blocks_sparql:
+            if self._inference_requires_in_memory(store):
+                # Native execution sends the raw query text to the
+                # backend, which cannot see rules that were never
+                # materialized into it: answers that only exist through
+                # inference would be missed. Route the query through
+                # the in-memory graph, which materializes the rules
+                # before the query runs (Codex).
+                self.logger.info(
+                    "Inference rules are enabled and materializable: "
+                    "executing the query on the in-memory rdflib graph "
+                    "so inferred triples participate in matching."
+                )
+                if options:
+                    self.logger.warning(
+                        "Inference forces the in-memory rdflib graph, "
+                        "where query options %s are not applied: the "
+                        "fallback always queries the full triplet "
+                        "set." % (options,)
+                    )
+                return self._execute_on_rdflib_graph(query)
             raw_result = execute(query, **options)
             return self._coerce_query_result(raw_result)
 
@@ -540,6 +566,42 @@ class SPARQLReasoner:
                 "the full triplet set." % (options,)
             )
         return self._execute_on_rdflib_graph(query)
+
+    def _inference_requires_in_memory(self, store: Any) -> bool:
+        """Whether the query must run on the in-memory graph for
+        inference to participate in WHERE matching.
+
+        Native backends execute the original query text, which cannot
+        see rules that were never materialized into the backend's
+        stored triples. When inference is enabled and at least one rule
+        is materializable, the in-memory path answers with inferred
+        triples included. Stores without ``get_triplets`` cannot take
+        that path and keep native execution (inference then only runs
+        at the result level via ``infer_results()``).
+        """
+        if not (self.enable_inference and self.reasoner.rules):
+            return False
+        if not any(
+            self._is_materializable_rule(rule) for rule in self.reasoner.rules
+        ):
+            return False
+        return callable(getattr(store, "get_triplets", None))
+
+    def _is_materializable_rule(self, rule: Rule) -> bool:
+        """Whether ``rule`` fits the ``IF ?x is_a Sub THEN ?x is_a Super``
+        form that triple materialization can express."""
+        conclusion = self._parse_is_a(rule.conclusion)
+        if conclusion is None:
+            return False
+        conclusion_var = conclusion[0]
+        conditions = rule.conditions or []
+        if not conditions:
+            return False
+        for condition in conditions:
+            parsed = self._parse_is_a(condition)
+            if parsed is None or parsed[0] != conclusion_var:
+                return False
+        return True
 
     def _coerce_query_result(self, raw_result: Any) -> SPARQLQueryResult:
         """Normalize a store result (QueryResult, dict, or list of
@@ -813,13 +875,16 @@ class SPARQLReasoner:
         """Materialize ``is_a`` inference rules into ``graph``.
 
         Rules of the form ``IF ?x is_a Sub THEN ?x is_a Super`` are
-        turned into extra ``rdf:type``-style triples *before* the query
-        runs, so matches that only exist through inference can satisfy
-        the query's WHERE clause (the query itself is never rewritten:
-        ``expand_query`` output is not executable SPARQL). Rules whose
-        conditions or conclusion do not fit the ``is_a`` form, or whose
-        variables do not line up, are skipped -- they are still handled
-        at the result level by ``infer_results()``.
+        turned into extra ``rdf:type`` triples *before* the query runs,
+        so matches that only exist through inference can satisfy the
+        query's WHERE clause (the query itself is never rewritten:
+        ``expand_query`` output is not executable SPARQL). Only
+        ``rdf:type`` triples are matched and only ``rdf:type`` triples
+        are added, so non-type relations are never rewritten to the
+        superclass. Rules whose conditions or conclusion do not fit the
+        ``is_a`` form, or whose variables do not line up, are skipped --
+        they are still handled at the result level by
+        ``infer_results()``.
 
         Returns the number of inferred triples added.
         """
@@ -840,24 +905,22 @@ class SPARQLReasoner:
     def _materialize_rule(self, graph: Any, rule: Rule) -> int:
         """Add the triples inferred by one ``is_a`` rule; 0 when the
         rule cannot be materialized."""
-        conclusion = self._parse_is_a(rule.conclusion)
-        if conclusion is None:
+        if not self._is_materializable_rule(rule):
             return 0
-        conclusion_var, conclusion_class = conclusion
-
-        # All conditions must be ``is_a`` constraints on the conclusion
-        # variable for the rule to be expressible as triple rewrites.
-        constraints = []
-        for condition in rule.conditions or []:
-            parsed = self._parse_is_a(condition)
-            if parsed is None or parsed[0] != conclusion_var:
-                return 0
-            constraints.append(parsed[1])
-        if not constraints:
-            return 0
+        _, conclusion_class = self._parse_is_a(rule.conclusion)
+        constraints = [
+            self._parse_is_a(condition)[1] for condition in rule.conditions
+        ]
 
         added = 0
         for subject, predicate, obj in list(graph):
+            # ``is_a`` rules are rdf:type rewrites: only rdf:type
+            # triples are matched, so a non-type relation whose object
+            # merely shares the class local name
+            # (``:alice :role :Employee``) is never extended to the
+            # superclass.
+            if not self._predicate_is_rdf_type(predicate):
+                continue
             if not all(
                 self._term_matches_class(obj, class_name)
                 for class_name in constraints
@@ -870,6 +933,15 @@ class SPARQLReasoner:
                 graph.add(inferred)
                 added += 1
         return added
+
+    _RDF_TYPE_IRI = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+
+    @classmethod
+    def _predicate_is_rdf_type(cls, predicate: Any) -> bool:
+        """Whether ``predicate`` is the rdf:type predicate (the full
+        IRI, rdflib ``RDF.type``, or the ``rdf:type`` shorthand)."""
+        text = str(predicate)
+        return text == cls._RDF_TYPE_IRI or text == "rdf:type"
 
     @staticmethod
     def _term_matches_class(term: Any, class_name: str) -> bool:
