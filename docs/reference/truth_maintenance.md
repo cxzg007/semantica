@@ -22,6 +22,7 @@ Use `TruthMaintenanceSession` when:
 - Facts come from external evidence that can be **corrected or withdrawn** (e.g. a document revision replaces one assertion with another).
 - You need derived conclusions to be removed **only when they lose all support**, not on any deletion.
 - You want a batch update that publishes the final state and **net changes**, instead of replaying intermediate states.
+- You are hitting the limits of `RetractAction`: it removes only the requested fact and leaves unsupported conclusions behind, while a naive deletion cascade would wrongly remove conclusions that still have alternative derivations or explicit support.
 
 Do not use it for recursive rules, temporal validity, external side effects, or multi-threaded access — see [Limitations](#limitations).
 
