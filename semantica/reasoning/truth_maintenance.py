@@ -357,7 +357,7 @@ class TruthMaintenanceSession:
             if not body_predicates & affected:
                 continue
             conclusions = candidate.remove_rule_derivations(snapshot.rule_id)
-            for premises, bindings, conclusion in _match_snapshot(
+            for premises, bindings, conclusion in self._match_rule(
                 snapshot, candidate
             ):
                 candidate.add_derivation(
@@ -373,6 +373,16 @@ class TruthMaintenanceSession:
                 ):
                     continue
                 candidate.remove_fact(conclusion, affected)
+
+    def _match_rule(
+        self, snapshot: _RuleSnapshot, facts: _SessionState
+    ) -> List[Tuple[Tuple[str, ...], Tuple[Tuple[str, str], ...], str]]:
+        """Matcher seam: single delegation point to the pure matching helper.
+
+        Exists only to isolate matching responsibility and to give tests a
+        fault-injection and call-counting site; not part of the public API.
+        """
+        return _match_snapshot(snapshot, facts)
 
     # -- commit -------------------------------------------------------------
 

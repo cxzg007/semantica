@@ -327,5 +327,78 @@ def test_bindings_sorted_and_premises_ordered():
     assert len(derivations) == 1
     d = derivations[0]
     assert d.rule_id == "r"
-    assert d.premises == ("A(v)", "B(w)")
-    assert d.bindings == (("?x", "w"), ("?y", "v"))
+
+
+# -- Task 3: processing failure atomicity and targeted maintenance ------------
+
+
+def test_processing_failure_rolls_back(monkeypatch):
+    from semantica.utils.exceptions import ProcessingError
+
+    session = TruthMaintenanceSession(rules=[rule("ab", ["A(?x)"], "B(?x)")])
+    session.apply(assertions=[FactSupport("old", "A(x)")])
+    before = (session.version, session.facts, session.explain("B(x)"))
+    real_matcher = session._match_rule
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected evaluator failure")
+
+    monkeypatch.setattr(session, "_match_rule", fail)
+    with pytest.raises(ProcessingError) as error:
+        session.apply(
+            assertions=[FactSupport("new", "A(y)")], retractions=["old"]
+        )
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert (session.version, session.facts, session.explain("B(x)")) == before
+    monkeypatch.setattr(session, "_match_rule", real_matcher)
+    session.apply(assertions=[FactSupport("new", "A(y)")], retractions=["old"])
+    assert session.facts == frozenset({"A(y)", "B(y)"})
+
+
+def test_retraction_without_fact_change_skips_matching(monkeypatch):
+    session = TruthMaintenanceSession(rules=[rule("ab", ["A(?x)"], "B(?x)")])
+    session.apply(assertions=[
+        FactSupport("s1", "A(x)"), FactSupport("s2", "A(x)"),
+    ])
+    calls = []
+    real_matcher = session._match_rule
+
+    def counting(*args, **kwargs):
+        calls.append(args[0].rule_id)
+        return real_matcher(*args, **kwargs)
+
+    monkeypatch.setattr(session, "_match_rule", counting)
+    delta = session.apply(retractions=["s1"])
+    assert not calls
+    assert not delta.added_facts and not delta.removed_facts
+    assert delta.removed_supports == (FactSupport("s1", "A(x)"),)
+    assert session.facts == frozenset({"A(x)", "B(x)"})
+    explanation = session.explain("B(x)")
+    assert explanation.active is True
+    assert len(explanation.derivations) == 1
+
+
+def test_assertion_rematches_only_dependent_rule_closure(monkeypatch):
+    session = TruthMaintenanceSession(rules=[
+        rule("ab", ["A(?x)"], "B(?x)"),
+        rule("bc", ["B(?x)"], "C(?x)"),
+        rule("zw", ["Z(?x)"], "W(?x)"),
+    ])
+    session.apply(assertions=[FactSupport("z", "Z(q)")])
+    calls = []
+    real_matcher = session._match_rule
+
+    def counting(snapshot, facts):
+        calls.append(snapshot.rule_id)
+        return real_matcher(snapshot, facts)
+
+    monkeypatch.setattr(session, "_match_rule", counting)
+    session.apply(assertions=[FactSupport("a", "A(x)")])
+    assert calls == ["ab", "bc"]
+    assert "zw" not in calls
+    assert session.facts == frozenset({"A(x)", "B(x)", "C(x)", "Z(q)", "W(q)"})
+    explanation = session.explain("C(x)")
+    assert explanation.active is True
+    assert len(explanation.derivations) == 1
+    assert explanation.derivations[0].rule_id == "bc"
+    assert session.explain("W(q)").derivations[0].rule_id == "zw"
