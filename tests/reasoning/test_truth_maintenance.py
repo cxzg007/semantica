@@ -6,6 +6,8 @@ support, cycle rejection, atomic failed batches, and the full input
 validation matrix.
 """
 
+from typing import FrozenSet, get_type_hints
+
 import pytest
 
 from semantica.reasoning import FactSupport, Rule, TruthMaintenanceSession
@@ -229,6 +231,27 @@ def test_duplicate_noop_batches():
     assert not delta.removed_facts
     delta = session.apply()
     assert delta.version == version
+
+
+def test_duplicate_retraction_ids_are_idempotent():
+    session = TruthMaintenanceSession(rules=[rule("ab", ["A(?x)"], "B(?x)")])
+    session.apply(assertions=[FactSupport("s", "A(a)")])
+    delta = session.apply(retractions=["s", "s"])
+    assert delta.removed_facts == frozenset({"A(a)", "B(a)"})
+    assert delta.removed_supports == (FactSupport("s", "A(a)"),)
+    assert not session.facts
+
+
+def test_duplicate_retraction_with_mixed_ids():
+    session = TruthMaintenanceSession(rules=[rule("ab", ["A(?x)"], "B(?x)")])
+    session.apply(assertions=[FactSupport("s1", "A(a)"), FactSupport("s2", "A(b)")])
+    session.apply(retractions=["s2", "s1", "s2", "unknown-id"])
+    assert session.facts == frozenset()
+
+
+def test_facts_annotation_resolvable_at_runtime():
+    hints = get_type_hints(TruthMaintenanceSession.facts.fget)
+    assert hints["return"] == FrozenSet[str]
 
 
 def test_retracted_id_can_reassert_same_fact_only():

@@ -12,7 +12,7 @@ assertions/retractions of :class:`FactSupport` entries.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Dict, List, Set, Tuple
+from typing import Dict, FrozenSet, List, Set, Tuple
 
 from ..utils.exceptions import ProcessingError, ValidationError
 from ._truth_maintenance_validation import (
@@ -217,8 +217,12 @@ class TruthMaintenanceSession:
                 validation_context={},
             ) from exc
 
+        # Deduplicate while preserving order: a support id listed twice in one
+        # batch is one net retraction, not an error.
         effective_retractions = [
-            rid for rid in retraction_items if rid in self._state.active_supports
+            rid
+            for rid in dict.fromkeys(retraction_items)
+            if rid in self._state.active_supports
         ]
         if not effective_assertions and not effective_retractions:
             return MaintenanceDelta(
