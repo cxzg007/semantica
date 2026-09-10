@@ -621,3 +621,135 @@ def test_agent_receives_no_withdrawn_conclusion():
     assert "Alice is eligible" not in llm.prompts[1]
     assert store.rows[0]["content"] == "Alice is eligible"
     assert store.calls == 2
+
+
+def graph_annotation(fact="A(x)", supports=()):
+    return {
+        "schema_version": 1,
+        "session_id": SESSION_ID,
+        "required_facts": [fact],
+        "required_support_ids": list(supports),
+    }
+
+
+def test_dict_graph_prose_only_describes_relationships_the_filter_validates():
+    # The filter validates at most 10 relationship attachments, so the
+    # rendered prose must not describe relationships beyond that cap:
+    # content and validated attachments have to stay aligned.
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    gate = make_gate(session)
+
+    entities = [
+        {
+            "id": "hub",
+            "name": "hub",
+            "type": "fact",
+            "metadata": {"truth_maintenance": graph_annotation()},
+        }
+    ]
+    relationships = []
+    for i in range(10):
+        spoke = f"spoke{i}"
+        entities.append(
+            {
+                "id": spoke,
+                "name": spoke,
+                "type": "fact",
+                "metadata": {"truth_maintenance": graph_annotation()},
+            }
+        )
+        relationships.append(
+            {
+                "source": "hub",
+                "target": spoke,
+                "type": "capped",
+                "metadata": {"truth_maintenance": graph_annotation()},
+            }
+        )
+    entities.append(
+        {
+            "id": "overflow",
+            "name": "overflow",
+            "type": "fact",
+            "metadata": {"truth_maintenance": graph_annotation()},
+        }
+    )
+    relationships.append(
+        {
+            "source": "hub",
+            "target": "overflow",
+            "type": "overflowed",
+            "metadata": {"truth_maintenance": graph_annotation()},
+        }
+    )
+
+    retriever = ContextRetriever(
+        knowledge_graph={"entities": entities, "relationships": relationships},
+        use_graph_expansion=True,
+    )
+    result = retriever.graph_search("hub", max_results=5, truth_filter=gate)
+
+    assert len(result) == 1
+    candidate = result[0]
+    assert len(candidate.related_relationships) == 10
+    assert "overflow" not in candidate.content
+
+
+def test_context_graph_annotations_survive_query_and_neighbor_paths():
+    # End-to-end through a real ContextGraph: add_node stores the
+    # annotation in node properties, query() exposes it via to_dict()
+    # (properties key), and get_neighbors entries must carry a metadata
+    # dict so the filter can validate neighbor attachments instead of
+    # dropping every graph candidate.
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    gate = make_gate(session)
+
+    graph = ContextGraph()
+    graph.add_node(
+        "root", "fact", "root content", truth_maintenance=graph_annotation()
+    )
+    graph.add_node(
+        "neighbor",
+        "fact",
+        "neighbor content",
+        truth_maintenance=graph_annotation(),
+    )
+    graph.add_edge("root", "neighbor", "supports")
+
+    retriever = ContextRetriever(knowledge_graph=graph, use_graph_expansion=True)
+    result = retriever.graph_search("root", max_results=5, truth_filter=gate)
+
+    assert len(result) == 1
+    stamped = result[0]
+    assert stamped.source == "graph:root"
+    assert stamped.content == "root content"
+    assert (
+        stamped.metadata["truth_maintenance_validation"]["version"]
+        == session.version
+    )
+    assert stamped.related_entities[0]["id"] == "neighbor"
+
+
+def test_context_graph_stale_neighbor_annotation_excludes_candidate():
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    gate = make_gate(session)
+
+    graph = ContextGraph()
+    graph.add_node(
+        "root", "fact", "root content", truth_maintenance=graph_annotation()
+    )
+    graph.add_node(
+        "neighbor",
+        "fact",
+        "neighbor content",
+        truth_maintenance=graph_annotation(fact="Missing(x)"),
+    )
+    graph.add_edge("root", "neighbor", "supports")
+
+    retriever = ContextRetriever(knowledge_graph=graph, use_graph_expansion=True)
+    assert (
+        retriever.graph_search("root", max_results=5, truth_filter=gate) == []
+    )

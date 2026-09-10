@@ -210,8 +210,13 @@ class TruthMaintenanceContextFilter:
         active_ids: frozenset,
     ) -> bool:
         try:
+            root_metadata = candidate.metadata
+            if not isinstance(root_metadata, dict):
+                # A malformed store record must remove only this candidate,
+                # never abort the whole filtered retrieval.
+                return False
             root_facts, root_supports = _validated_dependencies(
-                candidate.metadata.get("truth_maintenance"),
+                root_metadata.get("truth_maintenance"),
                 filter_session_id=self._session_id,
             )
             entity_facts, entity_supports = self._validate_attachments(

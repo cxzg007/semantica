@@ -376,8 +376,10 @@ class ContextRetriever:
                         content = res.get("content") or res.get("node", {}).get(
                             "content"
                         )
-                        metadata = res.get("metadata") or res.get("node", {}).get(
-                            "metadata"
+                        metadata = (
+                            res.get("metadata")
+                            or res.get("node", {}).get("metadata")
+                            or res.get("node", {}).get("properties")
                         )
 
                     score = res.get("score", 0.0)
@@ -577,6 +579,12 @@ class ContextRetriever:
                                     related_entities.append(e)
                                     break
                     
+                    # Cap relationship attachments before rendering prose so the
+                    # validated bundle and the rendered content stay aligned: the
+                    # filter only sees the first 10 relationships, so the prose
+                    # must describe no more than those 10.
+                    related_relationships = related_relationships[:10]
+
                     # Generate comprehensive content from entity and relationships
                     entity_display = entity.get('name', entity_id)
                     
@@ -690,7 +698,7 @@ class ContextRetriever:
                                 **entity.get("metadata", {}),
                             },
                             related_entities=related_entities[:10],  # Limit entities
-                            related_relationships=related_relationships[:10],  # Limit relationships
+                            related_relationships=related_relationships,  # Already capped above
                         )
                     )
 
@@ -1003,6 +1011,8 @@ class ContextRetriever:
                                             "id": target_id,
                                             "type": node.get("type"),
                                             "content": node.get("content"),
+                                            "metadata": node.get("metadata")
+                                            or node.get("properties"),
                                             "relationship": edge.get("type"),
                                             "hop": hop + 1,
                                         }
@@ -1021,6 +1031,8 @@ class ContextRetriever:
                                             "id": source_id,
                                             "type": node.get("type"),
                                             "content": node.get("content"),
+                                            "metadata": node.get("metadata")
+                                            or node.get("properties"),
                                             "relationship": edge.get("type"),
                                             "hop": hop + 1,
                                         }

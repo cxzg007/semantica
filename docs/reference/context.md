@@ -938,9 +938,9 @@ your behalf:
   keys: `schema_version` (currently `1`), `session_id` (must equal the
   filter's `session_id`), `required_facts`, and `required_support_ids`.
   At least one fact or support ID must be declared.
-- A candidate is kept only if every `required_fact` is in the snapshot's
-  `facts` **and** every `required_support_id` is in the snapshot's active
-  supports. Unannotated candidates and candidates with malformed annotations
+- A candidate is kept only if every entry of `required_facts` is in the
+  snapshot's `facts` **and** every entry of `required_support_ids` is in the
+  snapshot's active supports. Unannotated candidates and candidates with malformed annotations
   are removed whole — a record ID or node ID is never a trust signal.
 
 ### Source-specific citations
@@ -969,10 +969,12 @@ while silently dropping a stale attachment.
 - Each call validates against one immutable snapshot; if the session commits
   a new version while retrieval is in flight, `retrieve` raises
   `ProcessingError` instead of returning mixed-version results.
-- Memory and graph sources work the same way: construct the retriever with
-  `memory_store=` or `knowledge_graph=` and pass `truth_filter=` on every
-  retrieval, including the `search`, `vector_search`, and `graph_search`
-  delegates.
+- Vector, memory, and graph sources are filtered in the same pass: construct
+  the retriever with `memory_store=` or `knowledge_graph=` and pass
+  `truth_filter=` to `retrieve`, or to the `search`, `vector_search`, and
+  `graph_search` delegates (they forward to `retrieve`). `memory_search`
+  bypasses `retrieve` and does **not** apply the filter — use `retrieve` when
+  memory results must be grounded.
 
 ### Unsupported entry points
 

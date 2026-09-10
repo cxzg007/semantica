@@ -127,8 +127,8 @@ previously returned results cannot mutate the session.
 
 ## Cost Model
 
-- **Deletion propagation** and **affected-rule matching** are incremental: a deletion-only batch uses dependency indexes without rescanning all rules; insertions reevaluate only rules reachable from newly active predicates.
-- **Staging copies the whole session state** per `apply()` batch to guarantee atomic commits, and the session retains the **support catalog in memory** for the session lifetime (including withdrawn supports, so IDs stay bound).
+- **Deletion propagation** and **affected-rule matching** are targeted: a deletion-only batch uses dependency indexes to compute the affected fact set, then re-matches only the rules whose body predicates intersect that set (the affectedness scan itself walks the rule list, so cost still grows with rule count); insertions reevaluate only rules reachable from newly active predicates.
+- **Staging copies the whole session state** for each *effective* `apply()` batch to guarantee atomic commits (an empty or already-applied batch is a no-op and stages nothing), and the session retains the **support catalog in memory** for the session lifetime (including withdrawn supports, so IDs stay bound).
 - **Each `snapshot()` call copies the full committed state again** (facts, active supports, version), so consumers such as
   [`TruthMaintenanceContextFilter`](/reference/context#support-aware-retrieval-truth_filter)
   pay one whole-state copy per filtered retrieval. Do not call it in a tight

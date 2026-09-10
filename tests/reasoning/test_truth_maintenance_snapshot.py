@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 from semantica.reasoning import FactSupport, Rule, TruthMaintenanceSession
+from semantica.utils.exceptions import ValidationError
 
 
 def test_snapshot_is_detached_after_retraction():
@@ -72,7 +73,7 @@ def test_failed_apply_leaves_snapshot_unchanged():
     session = TruthMaintenanceSession(rules=[])
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     before = session.snapshot()
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         session.apply(retractions=["s1", 42])  # malformed retraction id
     after = session.snapshot()
     assert after.version == before.version
