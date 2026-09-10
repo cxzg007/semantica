@@ -113,14 +113,26 @@ Returns a `FactExplanation` for the current state:
 
 - `facts`: frozenset of all currently believed facts (explicit plus derived).
 - `version`: the commit counter described above.
+- `snapshot()`: returns a `TruthMaintenanceSnapshot` — a frozen dataclass
+  with `version`, `facts`, and `active_supports` (tuple sorted by support ID).
+  The snapshot is a full detached copy: later `apply()` batches never change
+  an existing snapshot.
 
-Returned snapshots (`MaintenanceDelta`, `FactExplanation`, `Derivation`) are frozen dataclasses with immutable collections; mutating caller-owned rules or previously returned results cannot mutate the session.
+All read-only views (`facts`, `version`, `snapshot()`, `explain()`) leave the
+session state unchanged. Returned snapshots (`MaintenanceDelta`,
+`FactExplanation`, `Derivation`, `TruthMaintenanceSnapshot`) are frozen
+dataclasses with immutable collections; mutating caller-owned rules or
+previously returned results cannot mutate the session.
 
 
 ## Cost Model
 
 - **Deletion propagation** and **affected-rule matching** are incremental: a deletion-only batch uses dependency indexes without rescanning all rules; insertions reevaluate only rules reachable from newly active predicates.
 - **Staging copies the whole session state** per `apply()` batch to guarantee atomic commits, and the session retains the **support catalog in memory** for the session lifetime (including withdrawn supports, so IDs stay bound).
+- **Each `snapshot()` call copies the full committed state again** (facts, active supports, version), so consumers such as
+  [`TruthMaintenanceContextFilter`](/reference/context#support-aware-retrieval-truth_filter)
+  pay one whole-state copy per filtered retrieval. Do not call it in a tight
+  loop when a single shared read is enough.
 - The copy-on-update and catalog costs are per-batch whole-state costs; do not assume end-to-end latency is strictly proportional to the affected subgraph. Measure before relying on performance.
 
 
@@ -138,4 +150,5 @@ Returned snapshots (`MaintenanceDelta`, `FactExplanation`, `Derivation`) are fro
 ## Links
 
 - [Reasoning](/reference/reasoning) — the rule engines this session builds on, including the `Rule` representation.
+- [Context](/reference/context#support-aware-retrieval-truth_filter) — `TruthMaintenanceContextFilter` consumes immutable snapshots to filter retrieved context by active support.
 - [Ontology](/reference/ontology) — ontology axioms and SHACL constraints.
