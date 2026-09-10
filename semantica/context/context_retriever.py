@@ -1810,7 +1810,8 @@ Answer:"""
                 ``{at_time}`` and ``{source}`` placeholders are substituted;
                 any other braces are left as-is.  Defaults to
                 ``"[Graph context valid as of: {at_time} UTC | Source: {source}]"``.
-            **kwargs: Additional retrieval options passed to ``retrieve()``
+            **kwargs: Additional retrieval options passed to ``retrieve()``; ``truth_filter`` is
+                rejected here, use ``retrieve()`` directly instead
 
         Returns:
             Dictionary with:
@@ -1829,6 +1830,15 @@ Answer:"""
             ... )
             >>> print(result['response'])
         """
+        if kwargs.get("truth_filter") is not None:
+            raise ValidationError(
+                "truth_filter is not supported on query_with_reasoning; use "
+                "ContextRetriever.retrieve(..., truth_filter=...) directly and "
+                "assemble the verified context before reasoning",
+                validation_context={
+                    "method": "ContextRetriever.query_with_reasoning"
+                },
+            )
         tracking_id = self.progress_tracker.start_tracking(
             file=None,
             module="context",

@@ -4,12 +4,15 @@ from copy import deepcopy
 
 import pytest
 from semantica.context import (
+    AgentContext,
+    ContextGraph,
     ContextRetriever,
     RetrievedContext,
     TruthMaintenanceContextFilter,
 )
 from semantica.reasoning import FactSupport, TruthMaintenanceSession
 from semantica.utils.exceptions import ProcessingError, ValidationError
+from semantica.vector_store import VectorStore
 
 SESSION_ID = "employment-session-1"
 
@@ -296,3 +299,290 @@ def test_empty_store_returns_empty_list():
     gate = make_gate(session)
     retriever = ContextRetriever(vector_store=store, use_graph_expansion=False)
     assert retriever.retrieve("query", max_results=5, truth_filter=gate) == []
+
+
+class ExplodingLLM:
+    """LLM fake; any call means the entry point failed to reject first."""
+
+    def generate(self, prompt):
+        raise AssertionError("llm provider must not be called")
+
+
+class ExplodingRetriever:
+    """Retriever fake; any call means the entry point failed to reject first."""
+
+    def retrieve(self, *args, **kwargs):
+        raise AssertionError("retriever must not be called")
+
+    def query_with_reasoning(self, *args, **kwargs):
+        raise AssertionError("retriever must not be called")
+
+
+class ExplodingMemory:
+    """Memory fake; any call means the entry point failed to reject first."""
+
+    def retrieve(self, *args, **kwargs):
+        raise AssertionError("memory store must not be called")
+
+
+class StaticMemoryStore:
+    """Memory source fake returning plain dict rows."""
+
+    def __init__(self, rows):
+        self.rows = deepcopy(rows)
+
+    def retrieve(self, *, query, max_results):
+        return deepcopy(self.rows[:max_results])
+
+
+class MutatingMemoryStore(StaticMemoryStore):
+    """Memory source fake whose retrieve mutates the session mid-retrieval."""
+
+    def __init__(self, rows, session, on_retrieve):
+        super().__init__(rows)
+        self.session = session
+        self.on_retrieve = on_retrieve
+
+    def retrieve(self, *, query, max_results):
+        results = super().retrieve(query=query, max_results=max_results)
+        self.on_retrieve(self.session)
+        return results
+
+
+class StaticGraphStore:
+    """Graph source fake: root row plus neighbor rows with annotations."""
+
+    def __init__(self, root_row, neighbors):
+        self.root_row = deepcopy(root_row)
+        self.neighbors = deepcopy(neighbors)
+
+    def query(self, query):
+        return [deepcopy(self.root_row)]
+
+    def get_neighbors(self, node_id, *, hops):
+        return deepcopy(self.neighbors)
+
+
+class MutatingGraphStore(StaticGraphStore):
+    """Graph source fake whose query mutates the session mid-retrieval."""
+
+    def __init__(self, root_row, neighbors, session, on_query):
+        super().__init__(root_row, neighbors)
+        self.session = session
+        self.on_query = on_query
+
+    def query(self, query):
+        results = super().query(query)
+        self.on_query(self.session)
+        return results
+
+
+def make_agent_context(with_graph):
+    # Built without a graph so construction stays hermetic in environments
+    # where optional KG embedding dependencies are absent; the graph branch
+    # is enabled afterwards together with the injected fake retriever.
+    context = AgentContext(
+        vector_store=VectorStore(backend="inmemory", dimension=64),
+        knowledge_graph=None,
+        decision_tracking=True,
+        kg_algorithms=False,
+        vector_store_features=False,
+    )
+    if with_graph:
+        context.knowledge_graph = ContextGraph()
+    return context
+
+
+def test_retriever_query_with_reasoning_rejects_truth_filter():
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    retriever = ContextRetriever(
+        vector_store=StaticVectorStore([row("live", "A(x)", 0.9, "live")]),
+        use_graph_expansion=False,
+    )
+    with pytest.raises(ValidationError):
+        retriever.query_with_reasoning(
+            "query",
+            llm_provider=ExplodingLLM(),
+            max_results=5,
+            truth_filter=make_gate(session),
+        )
+
+
+def test_agent_context_retrieve_rejects_truth_filter_with_graph():
+    context = make_agent_context(with_graph=True)
+    context._retriever = ExplodingRetriever()
+    with pytest.raises(ValidationError):
+        context.retrieve("query", truth_filter=make_gate(make_session()))
+
+
+def test_agent_context_retrieve_rejects_truth_filter_without_graph():
+    context = make_agent_context(with_graph=False)
+    context._memory = ExplodingMemory()
+    with pytest.raises(ValidationError):
+        context.retrieve("query", truth_filter=make_gate(make_session()))
+
+
+def test_agent_context_query_with_reasoning_rejects_truth_filter():
+    context = make_agent_context(with_graph=True)
+    context._retriever = ExplodingRetriever()
+    with pytest.raises(ValidationError):
+        context.query_with_reasoning(
+            "query",
+            llm_provider=ExplodingLLM(),
+            truth_filter=make_gate(make_session()),
+        )
+
+
+def test_search_delegates_truth_filter():
+    session = make_session()
+    session.apply(assertions=[FactSupport("live", "Current(x)")])
+    store = StaticVectorStore([
+        row("stale", "Old(x)", 0.99, "stale assertion"),
+        row("live", "Current(x)", 0.6, "current assertion"),
+    ])
+    retriever = ContextRetriever(vector_store=store, use_graph_expansion=False)
+    result = retriever.search(
+        "assertion", max_results=1, truth_filter=make_gate(session)
+    )
+    assert [r.content for r in result] == ["current assertion"]
+
+
+def test_vector_search_delegates_truth_filter():
+    session = make_session()
+    session.apply(assertions=[FactSupport("live", "Current(x)")])
+    store = StaticVectorStore([
+        row("stale", "Old(x)", 0.99, "stale assertion"),
+        row("live", "Current(x)", 0.6, "current assertion"),
+    ])
+    retriever = ContextRetriever(vector_store=store, use_graph_expansion=False)
+    result = retriever.vector_search(
+        "assertion", max_results=1, truth_filter=make_gate(session)
+    )
+    assert [r.content for r in result] == ["current assertion"]
+
+
+def test_graph_search_delegates_truth_filter():
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    graph = StaticGraphStore(
+        row("live", "A(x)", 0.9, "root content"),
+        [row("n1", "A(x)", 0.5, "neighbor")],
+    )
+    retriever = ContextRetriever(knowledge_graph=graph, use_graph_expansion=True)
+    result = retriever.graph_search(
+        "query", max_results=5, truth_filter=make_gate(session)
+    )
+    assert [r.content for r in result] == ["root content"]
+    assert result[0].source == "graph:live"
+    assert (
+        result[0].metadata["truth_maintenance_validation"]["version"]
+        == session.version
+    )
+
+
+def test_memory_source_candidates_are_filtered():
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    memory = StaticMemoryStore([
+        row("stale", "Old(x)", 0.99, "stale memory"),
+        row("live", "A(x)", 0.6, "live memory"),
+    ])
+    retriever = ContextRetriever(memory_store=memory, use_graph_expansion=False)
+    result = retriever.retrieve(
+        "query", max_results=5, truth_filter=make_gate(session)
+    )
+    assert [r.content for r in result] == ["live memory"]
+    assert result[0].source == "memory:live"
+    assert (
+        result[0].metadata["truth_maintenance_validation"]["version"]
+        == session.version
+    )
+
+
+def test_graph_root_with_unsupported_neighbor_dependency_is_excluded():
+    # A root whose attachment annotation declares an unsupported fact is
+    # excluded as a whole: PR2 does not trim attachments and keep the root.
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    graph = StaticGraphStore(
+        row("live", "A(x)", 0.9, "root content"),
+        [row("n1", "Missing(x)", 0.5, "neighbor")],
+    )
+    retriever = ContextRetriever(knowledge_graph=graph, use_graph_expansion=True)
+    assert (
+        retriever.retrieve(
+            "query", max_results=5, truth_filter=make_gate(session)
+        )
+        == []
+    )
+
+
+def test_graph_search_does_not_invent_annotations_from_node_id():
+    # Unannotated graph nodes are excluded: node_id is not a trust signal and
+    # PR2 does not auto-annotate nodes during retrieval.
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    unannotated_root = {
+        "id": "plain",
+        "type": "fact",
+        "score": 0.9,
+        "content": "plain content",
+        "metadata": {},
+    }
+    graph = StaticGraphStore(unannotated_root, [])
+    retriever = ContextRetriever(knowledge_graph=graph, use_graph_expansion=True)
+    assert (
+        retriever.graph_search(
+            "query", max_results=5, truth_filter=make_gate(session)
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("source_kind", ["vector", "memory", "graph"])
+@pytest.mark.parametrize("apply_kind", ["noop", "failed", "retraction"])
+def test_apply_state_during_multi_source_retrieval(source_kind, apply_kind):
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    gate = make_gate(session)
+
+    if apply_kind == "noop":
+
+        def mutate(target_session):
+            target_session.apply(assertions=[])
+
+    elif apply_kind == "failed":
+
+        def mutate(target_session):
+            with pytest.raises(ValidationError):
+                target_session.apply(assertions=[FactSupport("bad", "NotAFact")])
+
+    else:
+
+        def mutate(target_session):
+            target_session.apply(retractions=["s1"])
+
+    live_row = row("live", "A(x)", 0.9, "live")
+    if source_kind == "vector":
+        retriever = ContextRetriever(
+            vector_store=MutatingVectorStore([live_row], session, mutate),
+            use_graph_expansion=False,
+        )
+    elif source_kind == "memory":
+        retriever = ContextRetriever(
+            memory_store=MutatingMemoryStore([live_row], session, mutate),
+            use_graph_expansion=False,
+        )
+    else:
+        retriever = ContextRetriever(
+            knowledge_graph=MutatingGraphStore(live_row, [], session, mutate),
+            use_graph_expansion=True,
+        )
+
+    if apply_kind == "retraction":
+        with pytest.raises(ProcessingError):
+            retriever.retrieve("query", max_results=5, truth_filter=gate)
+    else:
+        result = retriever.retrieve("query", max_results=5, truth_filter=gate)
+        assert [r.content for r in result] == ["live"]
