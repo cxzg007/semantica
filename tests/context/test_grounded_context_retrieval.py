@@ -10,7 +10,7 @@ from semantica.context import (
     RetrievedContext,
     TruthMaintenanceContextFilter,
 )
-from semantica.reasoning import FactSupport, TruthMaintenanceSession
+from semantica.reasoning import FactSupport, Rule, TruthMaintenanceSession
 from semantica.utils.exceptions import ProcessingError, ValidationError
 from semantica.vector_store import VectorStore
 
@@ -586,3 +586,38 @@ def test_apply_state_during_multi_source_retrieval(source_kind, apply_kind):
     else:
         result = retriever.retrieve("query", max_results=5, truth_filter=gate)
         assert [r.content for r in result] == ["live"]
+
+
+class RecordingLLM:
+    def __init__(self):
+        self.prompts = []
+
+    def generate(self, prompt):
+        self.prompts.append(prompt)
+        return "recorded"
+
+
+def test_agent_receives_no_withdrawn_conclusion():
+    session = TruthMaintenanceSession(rules=[
+        Rule("employment", "employment", ["Employed(?x)"], "Eligible(?x)"),
+    ])
+    session.apply(assertions=[FactSupport("v1", "Employed(Alice)")])
+    store = StaticVectorStore([
+        row("cached", "Eligible(Alice)", 0.9, "Alice is eligible"),
+    ])
+    retriever = ContextRetriever(vector_store=store, use_graph_expansion=False)
+    gate = make_gate(session)
+    llm = RecordingLLM()
+
+    def answer():
+        checked = retriever.retrieve("eligibility", truth_filter=gate)
+        context = "\n".join(result.content for result in checked)
+        return llm.generate("Use only this checked context:\n" + context)
+
+    answer()
+    session.apply(retractions=["v1"])
+    answer()
+    assert "Alice is eligible" in llm.prompts[0]
+    assert "Alice is eligible" not in llm.prompts[1]
+    assert store.rows[0]["content"] == "Alice is eligible"
+    assert store.calls == 2
