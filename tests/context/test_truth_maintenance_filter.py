@@ -435,3 +435,24 @@ def test_empty_input_returns_empty_list():
     session = make_session()
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     assert gate.filter_contexts([], snapshot=gate.snapshot()) == []
+
+
+# --- malformed root metadata ---
+
+
+@pytest.mark.parametrize(
+    "broken_metadata",
+    [None, ["truth_maintenance"], 42],
+    ids=["none", "list", "int"],
+)
+def test_non_dict_root_metadata_removes_candidate_without_raising(broken_metadata):
+    # A store record whose top-level metadata is not a dict must remove only
+    # that candidate; the malformed record must never abort the whole call.
+    session = make_session()
+    session.apply(assertions=[FactSupport("s1", "A(x)")])
+    gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
+    broken = item(["A(x)"], text="broken record")
+    broken.metadata = broken_metadata
+    valid = item(["A(x)"], text="valid record")
+    results = gate.filter_contexts([broken, valid], snapshot=gate.snapshot())
+    assert [r.content for r in results] == ["valid record"]
