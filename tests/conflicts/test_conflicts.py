@@ -616,6 +616,68 @@ class TestConflictsModule(unittest.TestCase):
         self.assertEqual(result.resolved_value, json_text)
         self.assertIsInstance(result.resolved_value, str)
 
+    def test_voting_aggregates_int_and_float_equal_values(self):
+        """1 and 1.0 must aggregate as the same voting value.
+
+        Python defines 1 == 1.0 and hash(1) == hash(1.0).  The hashable-key
+        path must preserve this semantics so that a conflict containing both
+        int and float representations of the same number counts them together
+        rather than splitting them into separate buckets.
+        """
+        resolver = ConflictResolver()
+
+        conflict = Conflict(
+            conflict_id="c_int_float_vote",
+            conflict_type=ConflictType.VALUE_CONFLICT,
+            entity_id="e1",
+            property_name="score",
+            # 1 (int) and 1.0 (float) should merge → 3 votes vs 1 vote for 2
+            conflicting_values=[1, 1.0, 1, 2],
+            sources=[
+                {"document": "doc1", "confidence": 0.9},
+                {"document": "doc2", "confidence": 0.9},
+                {"document": "doc3", "confidence": 0.9},
+                {"document": "doc4", "confidence": 0.9},
+            ],
+        )
+
+        result = resolver.resolve_conflict(conflict, strategy="voting")
+        self.assertTrue(result.resolved)
+        # 1 and 1.0 are equal in Python; the merged bucket has 3 votes and wins
+        self.assertEqual(result.resolved_value, 1)
+        self.assertNotEqual(result.resolved_value, 2)
+
+    def test_voting_aggregates_bool_and_int_equal_values(self):
+        """True and 1 must aggregate as the same voting value.
+
+        Python defines True == 1 and hash(True) == hash(1).  The hashable-key
+        path must preserve this semantics so that boolean True and integer 1
+        are treated as the same candidate rather than split across separate
+        buckets.
+        """
+        resolver = ConflictResolver()
+
+        conflict = Conflict(
+            conflict_id="c_bool_int_vote",
+            conflict_type=ConflictType.VALUE_CONFLICT,
+            entity_id="e1",
+            property_name="flag",
+            # True and 1 should merge → 3 votes vs 1 vote for False
+            conflicting_values=[True, 1, True, False],
+            sources=[
+                {"document": "doc1", "confidence": 0.9},
+                {"document": "doc2", "confidence": 0.9},
+                {"document": "doc3", "confidence": 0.9},
+                {"document": "doc4", "confidence": 0.9},
+            ],
+        )
+
+        result = resolver.resolve_conflict(conflict, strategy="voting")
+        self.assertTrue(result.resolved)
+        # True and 1 are equal in Python; the merged bucket has 3 votes and wins
+        self.assertTrue(result.resolved_value == 1)  # True == 1 passes
+        self.assertNotEqual(result.resolved_value, False)
+
 
 if __name__ == "__main__":
     unittest.main()

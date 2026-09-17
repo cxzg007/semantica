@@ -75,16 +75,23 @@ def _hashable_key(value: Any) -> Any:
     breaks :class:`collections.Counter` and dict-key based aggregation used by
     the voting and credibility-weighted strategies.
 
-    The key is *type-tagged* so that a serialized structure can never alias a
-    scalar value: e.g. the dict ``{"a": 1}`` and the string ``'{"a": 1}'`` map
-    to distinct keys instead of colliding. Hashable values keep their original
-    identity within the ``"h"`` tag (so equal scalars still aggregate together);
-    unhashable values are serialized to a stable JSON string under the ``"j"``
+    The ``"h"`` / ``"j"`` / ``"r"`` namespace tag is sufficient to prevent a
+    serialised unhashable structure from aliasing a hashable scalar: e.g. the
+    dict ``{"a": 1}`` gets key ``("j", '{"a": 1}')`` while the string
+    ``'{"a": 1}'`` gets key ``("h", '{"a": 1}')``, so they remain distinct.
+
+    Hashable values are wrapped only in the ``"h"`` tag without any type name,
+    which preserves Python's native equality semantics: values that compare
+    equal and share the same hash (e.g. ``1`` and ``1.0``, ``True`` and ``1``)
+    map to the same key and therefore aggregate together, exactly as they did
+    before this fix when ``Counter`` was used directly on hashable values.
+
+    Unhashable values are serialised to a stable JSON string under the ``"j"``
     tag, falling back to ``repr()`` under the ``"r"`` tag when JSON fails.
     """
     try:
         hash(value)
-        return ("h", type(value).__name__, value)
+        return ("h", value)
     except TypeError:
         try:
             return ("j", json.dumps(value, sort_keys=True, default=str))
