@@ -67,6 +67,7 @@ class PipelineStep:
     delta_mode: bool = False
     base_version_id: Optional[str] = None
     target_version_id: Optional[str] = None
+    parallel_safe: bool = False
 
 
 @dataclass
@@ -131,16 +132,27 @@ class PipelineBuilder:
         delta_mode = config.pop("delta_mode", False)
         base_version_id = config.pop("base_version_id", None)
         target_version_id = config.pop("target_version_id", None)
+        dependencies = config.pop("dependencies", [])
+        handler = config.pop("handler", None)
+        parallel_safe = config.pop("parallel_safe", False)
+        if not isinstance(parallel_safe, bool):
+            raise ValidationError(
+                f"parallel_safe must be a boolean, got "
+                f"{type(parallel_safe).__name__} for step '{step_name}'"
+            )
+        if handler is None:
+            handler = self.step_registry.get(step_type)
 
         step = PipelineStep(
             name=step_name,
             step_type=step_type,
             config=config,
-            dependencies=config.get("dependencies", []),
-            handler=config.get("handler"),
+            dependencies=dependencies,
+            handler=handler,
             delta_mode = delta_mode,
             base_version_id=base_version_id,
             target_version_id=target_version_id,
+            parallel_safe=parallel_safe,
         )
 
         self.steps.append(step)
@@ -182,15 +194,27 @@ class PipelineBuilder:
         Returns:
             Self for method chaining
         """
+        if (
+            isinstance(level, bool)
+            or not isinstance(level, int)
+            or level <= 0
+        ):
+            raise ValidationError(
+                f"Parallelism level must be a positive integer, got {level!r}"
+            )
         self.pipeline_config["parallelism"] = level
         return self
 
-    def build(self, name: str = "default_pipeline") -> Pipeline:
+    def build(self, name: str = "default_pipeline", validate: bool = True) -> Pipeline:
         """
         Build pipeline from configuration.
 
         Args:
             name: Pipeline name
+            validate: Whether to validate the pipeline structure before
+                building.  Set to ``False`` when you need a pipeline object
+                to pass to an external validator (e.g. to test validation
+                logic separately).
 
         Returns:
             Built pipeline
@@ -202,14 +226,15 @@ class PipelineBuilder:
         )
 
         try:
-            # Validate pipeline structure
-            self.progress_tracker.update_tracking(
-                tracking_id, message="Validating pipeline structure..."
-            )
-            validation_result = self.validator.validate_pipeline(self)
-            if not validation_result.valid:
-                errors = validation_result.errors
-                raise ValidationError(f"Pipeline validation failed: {errors}")
+            # Validate pipeline structure (skip when caller opts out)
+            if validate:
+                self.progress_tracker.update_tracking(
+                    tracking_id, message="Validating pipeline structure..."
+                )
+                validation_result = self.validator.validate_pipeline(self)
+                if not validation_result.valid:
+                    errors = validation_result.errors
+                    raise ValidationError(f"Pipeline validation failed: {errors}")
 
             self.progress_tracker.update_tracking(
                 tracking_id, message="Creating pipeline object..."
@@ -272,7 +297,29 @@ class PipelineBuilder:
                 step_name = step_config.get("name")
                 step_type = step_config.get("type")
                 if step_name and step_type:
-                    self.add_step(step_name, step_type, **step_config.get("config", {}))
+                    step = self.add_step(
+                        step_name, step_type, **step_config.get("config", {})
+                    )
+                    step.dependencies = list(
+                        step_config.get("dependencies", step.dependencies)
+                    )
+                    step.delta_mode = step_config.get("delta_mode", step.delta_mode)
+                    step.base_version_id = step_config.get(
+                        "base_version_id", step.base_version_id
+                    )
+                    step.target_version_id = step_config.get(
+                        "target_version_id", step.target_version_id
+                    )
+                    raw_parallel_safe = step_config.get(
+                        "parallel_safe", step.parallel_safe
+                    )
+                    if not isinstance(raw_parallel_safe, bool):
+                        raise ValidationError(
+                            "parallel_safe must be a boolean for step "
+                            f"'{step_name}', got "
+                            f"{type(raw_parallel_safe).__name__}"
+                        )
+                    step.parallel_safe = raw_parallel_safe
 
             # Set parallelism if specified
             if "parallelism" in pipeline_config:
@@ -328,6 +375,7 @@ class PipelineBuilder:
                     "type": step.step_type,
                     "config": step.config,
                     "dependencies": step.dependencies,
+                    "parallel_safe": step.parallel_safe,
                 }
                 for step in self.steps
             ],
@@ -398,18 +446,35 @@ class PipelineSerializer:
 
         Returns:
             Serialized pipeline
+
+        Notes:
+            Step handlers are runtime callables and are intentionally omitted from
+            the serialized representation. They must be rebound after deserialization.
         """
+        reserved_config_keys = {
+            "handler",
+            "dependencies",
+            "delta_mode",
+            "base_version_id",
+            "target_version_id",
+            "parallel_safe",
+        }
         pipeline_data = {
             "name": pipeline.name,
             "steps": [
                 {
                     "name": step.name,
                     "type": step.step_type,
-                    "config": step.config,
+                    "config": {
+                        key: value
+                        for key, value in step.config.items()
+                        if key not in reserved_config_keys
+                    },
                     "dependencies": step.dependencies,
                     "delta_mode": getattr(step, "delta_mode", False),
                     "base_version_id": getattr(step, "base_version_id", None),
                     "target_version_id": getattr(step, "target_version_id", None),
+                    "parallel_safe": getattr(step, "parallel_safe", False),
                 }
                 for step in pipeline.steps
             ],
@@ -444,6 +509,24 @@ class PipelineSerializer:
             pipeline_data = json.loads(serialized_pipeline)
         else:
             pipeline_data = serialized_pipeline
+
+        # Runtime handlers are process-local and cannot be reconstructed safely
+        # from serialized data. Copy before sanitizing so dict inputs are not mutated.
+        pipeline_data = dict(pipeline_data)
+        sanitized_steps = []
+        for step_data in pipeline_data.get("steps", []):
+            sanitized_step = dict(step_data)
+            step_config = dict(sanitized_step.get("config", {}))
+            step_config.pop("handler", None)
+            sanitized_step["config"] = step_config
+            sanitized_steps.append(sanitized_step)
+        pipeline_data["steps"] = sanitized_steps
+
+        # Reapply pipeline-level config (e.g. parallelism) at the top level
+        # so build_pipeline picks it up
+        serialized_config = pipeline_data.pop("config", None) or {}
+        for key, value in serialized_config.items():
+            pipeline_data.setdefault(key, value)
 
         # Reconstruct pipeline
         builder = PipelineBuilder(**self.config)
