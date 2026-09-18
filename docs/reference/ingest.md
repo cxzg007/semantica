@@ -646,8 +646,8 @@ from semantica.ingest import ingest_file
 result = ingest_file("source_path", method="my_format")
 ```
 
-- [Parse](parse) — Parse raw sources into structured text and tables.
-- [Pipeline](pipeline) — Orchestrate ingest as the first pipeline step.
+- [Parse](/reference/parse) — Parse raw sources into structured text and tables.
+- [Pipeline](/reference/pipeline) — Orchestrate ingest as the first pipeline step.
 - [Snowflake Integration](../integrations/snowflake) — Snowflake-specific setup and authentication guide.
 - [Databricks Integration](../integrations/databricks) — Databricks Unity Catalog setup, authentication, and lineage guide.
-- [Provenance](provenance) — Track lineage from ingest through to inference.
+- [Provenance](/reference/provenance) — Track lineage from ingest through to inference.

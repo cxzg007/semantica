@@ -19,9 +19,11 @@ import {
   withAlpha,
   zoomTierAtLeast,
 } from "./graphTheme";
+import { getSemanticNodeColor } from "./graphColorLegend";
 import { classifyEntityShape } from "./graphEntityShape";
 import { computeGraphAnalyticsBase } from "./graphAnalytics";
 import type {
+  FocusedUnavailableReason,
   GraphDistanceBucketCounts,
   GraphDisplayMeta,
   GraphDisplayStateSnapshot,
@@ -31,6 +33,7 @@ import type {
   GraphInteractionState,
   GraphSelectedNodeKind,
   GraphViewMode,
+  GroupedViewUnavailableReason,
 } from "./types";
 
 const MAX_FOCUS_NEIGHBORS = GRAPH_THEME.focus.maxNeighbors;
@@ -575,7 +578,7 @@ function createEmptyDisplayState(
     selectedNodeKind: selectedNodeId ? "unavailable" : "none",
     canActivateFocused: false,
     resolvedFocusedNodeId: null,
-    focusedUnavailableReason: selectedNodeId ? "Selected item is not available in the current graph." : null,
+    focusedUnavailableReason: selectedNodeId ? { code: "not-in-graph" } : null,
   };
 }
 
@@ -621,7 +624,10 @@ export function resolveGroupedDisplayNodeId(
   return resolvedNodeId;
 }
 
-export function checkGroupedViewAvailability(): { available: boolean; reason: string | null } {
+export function checkGroupedViewAvailability(): {
+  available: boolean;
+  reason: GroupedViewUnavailableReason | null;
+} {
   const base = computeGraphAnalyticsBase(graph, {
     computeCommunities: true,
     computeCentrality: false,
@@ -629,7 +635,7 @@ export function checkGroupedViewAvailability(): { available: boolean; reason: st
   const available = base.communitiesByNode.size > 0;
   return {
     available,
-    reason: available ? null : "Grouped view is unavailable until communities can be detected.",
+    reason: available ? null : { code: "communities-undetected" },
   };
 }
 
@@ -681,10 +687,10 @@ export function resolveGroupedDisplayStateSnapshot(
   selectedNodeId: string,
   options?: {
     groupedViewAvailable?: boolean;
-    groupedViewReason?: string | null;
+    groupedViewReason?: GroupedViewUnavailableReason | null;
     selectedNodeKind?: GraphSelectedNodeKind;
     resolvedFocusedNodeId?: string | null;
-    focusedUnavailableReason?: string | null;
+    focusedUnavailableReason?: FocusedUnavailableReason | null;
   },
 ): GraphDisplayStateSnapshot {
   const displayState = createEmptyDisplayState(selectedNodeId, true);
@@ -713,12 +719,14 @@ export function resolveGroupedDisplayStateSnapshot(
   return displayState;
 }
 
-function validateGroupedDisplayGraph(grouped: Graph<NodeAttributes, EdgeAttributes>): string | null {
+function validateGroupedDisplayGraph(
+  grouped: Graph<NodeAttributes, EdgeAttributes>,
+): GroupedViewUnavailableReason | null {
   if (grouped.order === 0) {
-    return "Grouped view is unavailable because no community nodes could be created.";
+    return { code: "community-nodes-missing" };
   }
 
-  let invalidReason: string | null = null;
+  let invalidReason: GroupedViewUnavailableReason | null = null;
   grouped.forEachNode((nodeId, attrs) => {
     if (invalidReason) {
       return;
@@ -726,7 +734,7 @@ function validateGroupedDisplayGraph(grouped: Graph<NodeAttributes, EdgeAttribut
 
     const nodeAttrs = attrs as NodeAttributes;
     if (!Number.isFinite(Number(nodeAttrs.x)) || !Number.isFinite(Number(nodeAttrs.y))) {
-      invalidReason = `Grouped node ${nodeId} has invalid coordinates.`;
+      invalidReason = { code: "invalid-community-layout", nodeId };
     }
   });
 
@@ -740,7 +748,7 @@ function validateGroupedDisplayGraph(grouped: Graph<NodeAttributes, EdgeAttribut
     }
 
     if (!grouped.hasNode(sourceId) || !grouped.hasNode(targetId)) {
-      invalidReason = `Grouped edge ${edgeId} references a missing grouped node.`;
+      invalidReason = { code: "missing-grouped-node", edgeId };
     }
   });
 
@@ -1013,9 +1021,8 @@ function resolveNodeColor(
   state: GraphNodeVisualState,
   attrs: NodeAttributes,
   cameraRatio: number,
-  fallbackColor?: string,
 ) {
-  const semanticColor = String(attrs.baseColor || fallbackColor || theme.palette.semantic[0]);
+  const semanticColor = getSemanticNodeColor(attrs, theme);
   const isCommunityGroup = Boolean(attrs.isCommunityGroup);
   const entityShapeConfig = theme.nodes.entityShapes[resolveEntityShape(attrs)];
   const overviewTint = state === "neighbor"
@@ -1062,9 +1069,8 @@ function resolveNodeShellColor(
   state: GraphNodeVisualState,
   attrs: NodeAttributes,
   cameraRatio: number,
-  fallbackColor?: string,
 ) {
-  const semanticColor = String(attrs.baseColor || fallbackColor || theme.palette.semantic[0]);
+  const semanticColor = getSemanticNodeColor(attrs, theme);
   const isCommunityGroup = Boolean(attrs.isCommunityGroup);
   const entityShapeConfig = theme.nodes.entityShapes[resolveEntityShape(attrs)];
   const presenceBoost = getOverviewPresenceBoost(cameraRatio);
@@ -1633,8 +1639,8 @@ export function resolveNodeElementStyle(
   const isCommunityGroup = Boolean(attrs.isCommunityGroup);
   const baseSize = Number(attrs.baseSize || attrs.size || 4);
   const labelPriority = Number(attrs.labelPriority ?? 0);
-  const color = resolveNodeColor(theme, zoomTier, state, attrs, cameraRatio, attrs.color);
-  const shellColor = resolveNodeShellColor(theme, zoomTier, state, attrs, cameraRatio, attrs.color);
+  const color = resolveNodeColor(theme, zoomTier, state, attrs, cameraRatio);
+  const shellColor = resolveNodeShellColor(theme, zoomTier, state, attrs, cameraRatio);
   const sizeMultiplier = (state === "default" ? tierConfig.nodeScale : stateConfig.sizeMultiplier)
     * variantConfig.sizeMultiplier
     * (isCommunityGroup ? theme.grouped.style.nodeSizeScale : 1);
@@ -1783,6 +1789,7 @@ export function resolveEdgeElementStyle(
   const isCommunityBundle = attrs.bundleKind === "community";
   const baseSize = Number(attrs.baseSize || attrs.size || 0.9);
   const visualPriority = Number(attrs.visualPriority ?? 0);
+  const isSmallGraphEdge = viewMode === "full" && attrs.isSmallGraph === true;
   const isFullBridgeEdge = viewMode === "full" && fullEdgeClass === "bridge";
   const isFullBackboneEdge = viewMode === "full" && fullEdgeClass === "backbone";
   const shouldCurveBridge = isFullBridgeEdge
@@ -1790,11 +1797,13 @@ export function resolveEdgeElementStyle(
   const visibilityPolicy = resolveEdgeVisibilityPolicy(theme, viewMode, zoomTier, isCommunityBundle);
   const isContextEdge = isContextEdgeState(state);
   const isNonCriticalEdge = isNonCriticalEdgeVariant(edgeVariant);
-  const belowPriorityThreshold = state === "default"
+  const belowPriorityThreshold = !isSmallGraphEdge && state === "default"
     && visualPriority < Math.max(tierConfig.edgePriorityThreshold, visibilityPolicy.defaultPriorityThreshold)
     && isNonCriticalEdge;
-  const hiddenByMutedState = (state === "muted" || state === "inactive") && visibilityPolicy.hideMuted;
-  const sampledOut = isNonCriticalEdge
+  const hiddenByMutedState = !isSmallGraphEdge
+    && (state === "muted" || state === "inactive")
+    && visibilityPolicy.hideMuted;
+  const sampledOut = !isSmallGraphEdge && isNonCriticalEdge
     && (
       (state === "default" && !isContextEdge && shouldSampleOutBackgroundEdge(visibilityPolicy.backgroundSampleRate, visualPriority, edgeId, sourceId, targetId))
       || (
@@ -1837,11 +1846,14 @@ export function resolveEdgeElementStyle(
       ? resolveEdgeCurvature(theme, state, edgeVariant, attrs, sourceId, targetId)
       : 0;
   const baseColor = resolveEdgeColor(theme, zoomTier, state, attrs, attrs.color, fullEdgeClass);
-  const lodAlpha = resolveEdgeLodAlpha(theme, viewMode, zoomTier, state, attrs, isCommunityBundle, fullEdgeClass);
+  const resolvedLodAlpha = resolveEdgeLodAlpha(theme, viewMode, zoomTier, state, attrs, isCommunityBundle, fullEdgeClass);
+  const lodAlpha = isSmallGraphEdge
+    ? Math.max(resolvedLodAlpha ?? 1, isContextEdge ? 0.62 : 0.46)
+    : resolvedLodAlpha;
   const color = lodAlpha === null ? baseColor : withAlpha(baseColor, lodAlpha);
   const rawSize = Math.max(
     baseSize * sizeMultiplier * (isCommunityBundle ? theme.grouped.style.edgeSizeScale : 1),
-    stateConfig.minSize,
+    isSmallGraphEdge ? Math.max(stateConfig.minSize, 0.9) : stateConfig.minSize,
   );
   
   const interactionMaxSize = (fullEdgeClass === "path" || state === "path")
@@ -2202,7 +2214,7 @@ function buildCommunityGroupedGraph(): GraphDisplayResult {
   const state = createEmptyDisplayState("", true);
   state.groupedViewAvailable = base.communitiesByNode.size > 0;
   if (base.communitiesByNode.size === 0) {
-    state.groupedViewReason = "Grouped view is unavailable until communities can be detected.";
+    state.groupedViewReason = { code: "communities-undetected" };
     return { graph: aggregateDisplayGraph(graph), state, meta: MIRRORED_DISPLAY_META };
   }
 
@@ -2479,10 +2491,10 @@ export function resolveDisplayStateSnapshot(
     aggregationEnabled?: boolean;
     collapsedNeighborhoodNodeIds?: Iterable<string>;
     groupedViewAvailable?: boolean;
-    groupedViewReason?: string | null;
+    groupedViewReason?: GroupedViewUnavailableReason | null;
     selectedNodeKind?: GraphSelectedNodeKind;
     resolvedFocusedNodeId?: string | null;
-    focusedUnavailableReason?: string | null;
+    focusedUnavailableReason?: FocusedUnavailableReason | null;
   },
 ): GraphDisplayStateSnapshot {
   const aggregationEnabled = options?.aggregationEnabled ?? true;
@@ -2501,7 +2513,7 @@ export function resolveDisplayStateSnapshot(
     computeCentrality: false,
   }).communitiesByNode.size > 0;
   displayState.groupedViewReason = options?.groupedViewReason
-    ?? (displayState.groupedViewAvailable ? null : "Grouped view is unavailable until communities can be detected.");
+    ?? (displayState.groupedViewAvailable ? null : { code: "communities-undetected" });
 
   if (!selectedNodeId || !graph.hasNode(selectedNodeId)) {
     return displayState;
@@ -2564,6 +2576,7 @@ export function createFocusedGraph(
     color: selectedState.color,
     size: Math.max(selectedState.size, 22),
     baseColor: selectedState.color,
+    semanticBaseColor: getSemanticNodeColor(selectedAttrs),
     baseSize: Math.max(selectedState.size, 22),
     label: selectedState.label,
   });
@@ -2603,6 +2616,7 @@ export function createFocusedGraph(
       color: style.color,
       size: Math.max(style.size, 8.5),
       baseColor: style.color,
+      semanticBaseColor: getSemanticNodeColor(baseAttrs),
       baseSize: Math.max(style.size, 8.5),
       label: style.label,
     });

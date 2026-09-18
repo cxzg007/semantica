@@ -407,6 +407,31 @@ test("resolveEdgeElementStyle applies full-graph LOD to directional background e
   assert.equal(style.hidden, true);
 });
 
+test("resolveEdgeElementStyle keeps small-graph relationships visible in overview", () => {
+  const style = resolveEdgeElementStyle(
+    GRAPH_THEME,
+    "overview",
+    "inactive",
+    {
+      edgeType: "related_to",
+      weight: 1,
+      properties: {},
+      edgeVariant: "directional",
+      visualPriority: 0.1,
+      baseSize: 0.5,
+      isSmallGraph: true,
+    },
+    "source",
+    "target",
+    "full",
+    "small-graph-low-priority",
+    "hidden",
+  );
+
+  assert.equal(style.hidden, false);
+  assert.ok(Number(style.size ?? 0) >= 0.9);
+});
+
 test("classifyFullGraphEdge applies deterministic priority order", () => {
   const edgeClass = classifyFullGraphEdge(
     "edge-priority",
@@ -1035,7 +1060,7 @@ test("resolveGroupedDisplayStateSnapshot maps selected base node to community in
 test("checkGroupedViewAvailability returns unavailable on empty graph", () => {
   const result = checkGroupedViewAvailability();
   assert.equal(result.available, false);
-  assert.ok(typeof result.reason === "string" && result.reason.length > 0);
+  assert.equal(result.reason?.code, "communities-undetected");
 });
 
 test("checkGroupedViewAvailability returns available when communities exist", () => {

@@ -15,6 +15,7 @@ Strategy:
 
 import json
 import os
+import re
 import stat
 import types
 from typing import Any
@@ -67,6 +68,19 @@ def _json_output(result) -> Any:
     """Parse JSON from command output; raises on bad JSON."""
     assert result.exit_code == 0, f"exit={result.exit_code}: {result.output}"
     return json.loads(result.output.strip())
+
+
+def _flatten(output: str) -> str:
+    """Undo Rich panel wrapping for substring assertions on error text.
+
+    Rich wraps long messages across multiple bordered lines (each with its
+    own leading/trailing "│"), so a naive whitespace join still leaves those
+    border characters between words that were split across lines. Strip the
+    box-drawing characters first, then collapse whitespace.
+    """
+    for ch in "┌┐└┘│─":
+        output = output.replace(ch, " ")
+    return " ".join(output.split())
 
 
 # ─── Global flags ─────────────────────────────────────────────────────────────
@@ -335,6 +349,79 @@ class TestIngest:
         assert data["files"] == [{"path": "README.md"}]
         assert captured["sources"] == "README.md"
         assert captured["kwargs"]["method"] == "file"
+
+    def test_configured_graph_backend_does_not_report_false_success(
+        self, runner, monkeypatch
+    ):
+        monkeypatch.setenv("GRAPH_STORE_DEFAULT_BACKEND", "neo4j")
+        monkeypatch.setattr(
+            "semantica.ingest.methods.ingest_file",
+            lambda sources, **kwargs: [{"path": sources}],
+        )
+
+        result = runner.invoke(cli_module.main, ["ingest", "README.md"])
+        output = _flatten(result.output)
+
+        assert result.exit_code != 0
+        assert "does not write to graph stores" in output
+        assert "Ingested:" not in output
+
+    def test_configured_graph_backend_error_does_not_recommend_broken_kg_build(
+        self, runner, monkeypatch
+    ):
+        # kg build also does not persist to a configured graph store
+        # (tracked separately as #1352), so the error must not send users to
+        # a command that will silently no-op the same way.
+        monkeypatch.setenv("GRAPH_STORE_DEFAULT_BACKEND", "neo4j")
+        monkeypatch.setattr(
+            "semantica.ingest.methods.ingest_file",
+            lambda sources, **kwargs: [{"path": sources}],
+        )
+
+        result = runner.invoke(cli_module.main, ["ingest", "README.md"])
+        output = _flatten(result.output)
+
+        assert result.exit_code != 0
+        assert "kg build" not in output
+
+    def test_output_flag_writes_real_content_and_bypasses_graph_error(
+        self, runner, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("GRAPH_STORE_DEFAULT_BACKEND", "neo4j")
+        monkeypatch.setattr(
+            "semantica.ingest.methods.ingest_file",
+            lambda sources, **kwargs: [{"path": sources}],
+        )
+        out_path = tmp_path / "out.json"
+
+        result = runner.invoke(
+            cli_module.main, ["ingest", "README.md", "--output", str(out_path)]
+        )
+
+        _ok(result, substr="Wrote")
+        written = json.loads(out_path.read_text(encoding="utf-8"))
+        assert written == {"files": [{"path": "README.md"}]}
+
+    def test_store_and_output_are_not_forwarded_to_ingest_backend(
+        self, runner, monkeypatch, tmp_path
+    ):
+        captured = {}
+
+        def fake_ingest_file(sources, **kwargs):
+            captured["kwargs"] = kwargs
+            return [{"path": sources}]
+
+        monkeypatch.setattr("semantica.ingest.methods.ingest_file", fake_ingest_file)
+        out_path = tmp_path / "out.json"
+
+        result = runner.invoke(
+            cli_module.main,
+            ["ingest", "README.md", "--store", "neo4j", "--output", str(out_path)],
+        )
+
+        _ok(result)
+        assert "store" not in captured["kwargs"]
+        assert "output" not in captured["kwargs"]
 
     def test_import_error_is_clean(self, runner, monkeypatch):
         monkeypatch.setattr(cli_module, "__import__", _import_side_effect, raising=False)
@@ -770,6 +857,642 @@ class TestReason:
             result = runner.invoke(cli_module.main, ["reason", "run"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+
+    def test_run_infers_from_graph_store_facts(self, runner, monkeypatch, tmp_path):
+        # reason run used to call Reasoner.run(), which does not exist
+        # (#1354); it must feed graph store facts + --rules into
+        # Reasoner.infer_facts().
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text(
+            '- IF Person(?x) THEN Human(?x)\n'
+            '- IF MANAGES(?x, ?y) THEN Manager(?x)\n'
+            '- IF Employee(?x) THEN Staff(?x)\n',
+            encoding="utf-8")
+
+        class _FakeStore:
+            # Same dict schema as the real backends: nodes carry
+            # labels/properties, relationships carry start_node_id/end_node_id.
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"],
+                         "properties": {"name": "Alice"}},
+                        {"id": 2, "labels": ["Person", "Employee"],
+                         "properties": {"name": "Bob"}}]
+
+            def get_relationships(self, limit=None):
+                return [{"id": 9, "type": "MANAGES",
+                         "start_node_id": 1, "end_node_id": 2}]
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--rules", str(rules_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        # Person(Alice), Person(Bob), Employee(Bob), MANAGES(Alice, Bob)
+        assert data["facts"] == 4
+        assert "Human(Alice)" in data["inferred_facts"]
+        # Relationship endpoints resolve node ids to names.
+        assert "Manager(Alice)" in data["inferred_facts"]
+        # Secondary labels also become facts.
+        assert "Staff(Bob)" in data["inferred_facts"]
+        assert data["inferred_count"] == len(data["inferred_facts"])
+
+    def test_run_rejects_unwired_engine(self, runner):
+        result = runner.invoke(cli_module.main,
+                               ["reason", "run", "--engine", "sparql"])
+        assert result.exit_code != 0
+        # _flatten() undoes the Rich panel's line-wrap borders, which would
+        # otherwise split "reason query" mid-word and break a raw substring
+        # check.
+        normalized = _flatten(result.output)
+        assert "not wired" in normalized
+        assert "reason query" in normalized
+        assert "Traceback" not in result.output
+
+    def test_run_reasoning_local_json_flag_suppresses_spinner(self, runner, monkeypatch):
+        """`reason run --json` (the command's own flag, not the global one)
+        must not enter the Rich status spinner. console.status() writes to
+        stdout; entering it under the local-only flag would put status text
+        ahead of the JSON payload in the same stream."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        status_calls = []
+        real_status = cli_module.console.status
+
+        def _spy_status(*a, **kw):
+            status_calls.append((a, kw))
+            return real_status(*a, **kw)
+
+        monkeypatch.setattr(cli_module.console, "status", _spy_status)
+        result = runner.invoke(cli_module.main, ["reason", "run", "--json"])
+        _ok(result)
+        assert status_calls == []
+
+    def test_run_deductive_falls_back_to_graph_store_facts(self, runner, monkeypatch, tmp_path):
+        """--engine deductive without --premises should build Premises from
+        the graph store, matching the rete/datalog fallback convention."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text(
+            "- IF Person(?x) THEN Human(?x)\n"
+            "- IF MANAGES(?x, ?y) THEN Manager(?x)\n",
+            encoding="utf-8")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}},
+                        {"id": 2, "labels": ["Person", "Employee"], "properties": {"name": "Bob"}}]
+
+            def get_relationships(self, limit=None):
+                return [{"id": 9, "type": "MANAGES", "start_node_id": 1, "end_node_id": 2}]
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "deductive", "--rules", str(rules_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "deductive"
+        assert data["facts"] == 4
+        assert "Human(Alice)" in data["inferred_facts"]
+        assert "Human(Bob)" in data["inferred_facts"]
+        assert "Manager(Alice)" in data["inferred_facts"]
+        assert data["inferred_count"] == len(data["inferred_facts"])
+
+    def test_run_deductive_uses_premises_file(self, runner, monkeypatch, tmp_path):
+        """--premises should be used instead of the graph store when given,
+        and accept both plain strings and {statement, confidence} entries."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        premises_file = tmp_path / "premises.yaml"
+        premises_file.write_text(
+            "- Person(Alice)\n"
+            "- {statement: 'Person(Bob)', confidence: 0.7}\n",
+            encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "deductive",
+             "--rules", str(rules_file), "--premises", str(premises_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["facts"] == 2
+        assert "Human(Alice)" in data["inferred_facts"]
+        assert "Human(Bob)" in data["inferred_facts"]
+
+    def test_run_deductive_reaches_fixpoint_across_rule_order(self, runner, monkeypatch, tmp_path):
+        """DeductiveReasoner.apply_logic() scans its rules once, not to a
+        fixpoint -- a single call would miss Human(Bob) here since the rule
+        deriving it needs Employee(Bob), which is itself only derived by a
+        *later* rule in this same call. reason run must loop apply_logic()
+        until no new conclusions appear so rule order doesn't silently drop
+        valid transitive conclusions."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text(
+            "- IF Employee(?x) THEN Human(?x)\n"
+            "- IF Manager(?x) THEN Employee(?x)\n",
+            encoding="utf-8")
+        premises_file = tmp_path / "premises.yaml"
+        premises_file.write_text("- Manager(Bob)\n", encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "deductive",
+             "--rules", str(rules_file), "--premises", str(premises_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert "Employee(Bob)" in data["inferred_facts"]
+        assert "Human(Bob)" in data["inferred_facts"]
+
+    def test_run_abductive_requires_observations(self, runner, monkeypatch):
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(cli_module.main, ["reason", "run", "--engine", "abductive"])
+        assert result.exit_code != 0
+        assert "--observations" in result.output
+        assert "Traceback" not in result.output
+
+    def test_run_abductive_finds_explanations(self, runner, monkeypatch, tmp_path):
+        """--engine abductive should find rules whose conclusion explains
+        each observation, not force everything through infer_facts()."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        obs_file = tmp_path / "observations.yaml"
+        obs_file.write_text("- Human(Alice)\n", encoding="utf-8")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}}]
+
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "abductive",
+             "--rules", str(rules_file), "--observations", str(obs_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "abductive"
+        assert data["observations"] == 1
+        assert len(data["explanations"]) == 1
+        exp = data["explanations"][0]
+        assert exp["observation"] == "Human(Alice)"
+        assert exp["best_hypothesis"] is not None
+        assert exp["hypotheses_considered"] == 1
+
+    def test_run_abductive_no_matching_rule_returns_empty_explanation(
+        self, runner, monkeypatch, tmp_path
+    ):
+        """An observation no loaded rule can explain must report cleanly
+        (no hypotheses), not crash or fabricate an explanation."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        obs_file = tmp_path / "observations.yaml"
+        obs_file.write_text("- Unicorn(Alice)\n", encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "abductive",
+             "--rules", str(rules_file), "--observations", str(obs_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        exp = data["explanations"][0]
+        assert exp["best_hypothesis"] is None
+        assert exp["hypotheses_considered"] == 0
+
+    def test_run_abductive_does_not_require_graph_store(self, runner, monkeypatch, tmp_path):
+        """A fully self-contained abductive run (--rules + --observations)
+        must not depend on the configured graph store being reachable.
+        AbductiveReasoner doesn't currently consume knowledge_base at all,
+        so calling _graph_store_facts() here would only add a failure mode
+        with no corresponding benefit."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+        obs_file = tmp_path / "observations.yaml"
+        obs_file.write_text("- Human(Alice)\n", encoding="utf-8")
+
+        def _unreachable_store(ctx):
+            raise RuntimeError("graph store should not be contacted")
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", _unreachable_store)
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "abductive",
+             "--rules", str(rules_file), "--observations", str(obs_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["explanations"][0]["best_hypothesis"] is not None
+
+    def test_run_datalog_derives_facts_from_graph_store(self, runner, monkeypatch, tmp_path):
+        """--engine datalog should run DatalogReasoner.derive_all(), not infer_facts()."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        # Predicate case matches the graph's own label/relationship-type
+        # spelling (title-case "Person", upper-case "MANAGES") -- only
+        # arguments get lowercased into Datalog constants, not predicates.
+        rules_file = tmp_path / "rules.dl"
+        rules_file.write_text(
+            "Human(X) :- Person(X).\n"
+            "Manager(X) :- MANAGES(X, Y).\n",
+            encoding="utf-8")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}},
+                        {"id": 2, "labels": ["Person", "Employee"], "properties": {"name": "Bob"}}]
+
+            def get_relationships(self, limit=None):
+                return [{"id": 9, "type": "MANAGES", "start_node_id": 1, "end_node_id": 2}]
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "datalog", "--rules", str(rules_file)],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "datalog"
+        # Person(alice), Person(bob), Employee(bob), MANAGES(alice, bob)
+        assert data["facts"] == 4
+        assert "Human(alice)" in data["inferred_facts"]
+        assert "Human(bob)" in data["inferred_facts"]
+        assert "Manager(alice)" in data["inferred_facts"]
+        # Base facts must not be reported back as "inferred".
+        assert "Person(alice)" not in data["inferred_facts"]
+        assert data["inferred_count"] == len(data["inferred_facts"])
+
+    def test_run_datalog_lowercases_args_only_not_predicate(self):
+        """Regression for a case-mismatch bug: lowercasing the whole fact
+        string (not just its arguments) made facts like "person(alice)"
+        unmatchable by rules written against the graph's real label
+        spelling, e.g. "Human(X) :- Person(X)."."""
+        assert cli_module._lowercase_datalog_args("Person(Alice)") == "Person(alice)"
+        assert cli_module._lowercase_datalog_args(
+            "MANAGES(Alice, Bob)") == "MANAGES(alice, bob)"
+
+    def test_run_datalog_rejects_ifthen_rules_cleanly(self, runner, monkeypatch, tmp_path):
+        """A rete-style '--rules' file (IF/THEN) is not valid Datalog syntax;
+        it must surface as a clean error, not a Traceback."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        rules_file = tmp_path / "rules.yaml"
+        rules_file.write_text("- IF Person(?x) THEN Human(?x)\n", encoding="utf-8")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main,
+            ["reason", "run", "--engine", "datalog", "--rules", str(rules_file)],
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+
+    def test_run_datalog_no_rules_uses_empty_ruleset(self, runner, monkeypatch):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}}]
+
+            def get_relationships(self, limit=None):
+                return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(
+            cli_module.main, ["--json", "reason", "run", "--engine", "datalog"])
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["facts"] == 1
+        assert data["inferred_count"] == 0
+        assert data["inferred_facts"] == []
+
+    def test_run_graph_requires_query(self, runner, monkeypatch):
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(cli_module.main, ["reason", "run", "--engine", "graph"])
+        assert result.exit_code != 0
+        assert "--query" in result.output
+        assert "Traceback" not in result.output
+
+    def test_run_graph_dispatches_to_graph_reasoner(self, runner, monkeypatch, tmp_path):
+        """--engine graph should call GraphReasoner.reason(graph, query) and
+        surface its natural-language answer, not the facts-count shape.
+
+        Also regression-guards two context-building gaps: a node with
+        multiple labels must keep all of them (not just labels[0]), and a
+        relationship's properties must reach GraphReasoner, not just its
+        source/target/type.
+        """
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person", "Manager"], "properties": {"name": "Alice"}},
+                        {"id": 2, "labels": ["Person"], "properties": {"name": "Bob"}}]
+
+            def get_relationships(self, limit=None):
+                return [{"id": 9, "type": "MANAGES", "start_node_id": 1, "end_node_id": 2,
+                          "properties": {"since": "2020"}}]
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+
+        class _FakeGraphReasoner:
+            def __init__(self, config=None, **kwargs):
+                pass
+
+            def reason(self, graph, query, **options):
+                assert graph["entities"][0]["name"] == "Alice"
+                assert graph["entities"][0]["type"] == "Person/Manager"
+                assert graph["relationships"][0]["type"] == "MANAGES"
+                assert graph["relationships"][0]["properties"] == {"since": "2020"}
+                assert query == "Who manages Bob?"
+                return "Alice manages Bob."
+
+        monkeypatch.setattr(
+            "semantica.reasoning.GraphReasoner", _FakeGraphReasoner, raising=False)
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "run", "--engine", "graph",
+             "--query", "Who manages Bob?"],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "graph"
+        assert data["query"] == "Who manages Bob?"
+        assert data["answer"] == "Alice manages Bob."
+        assert data["facts"] == 3
+
+    def test_run_graph_surfaces_reasoner_failure_as_error(self, runner, monkeypatch):
+        """GraphReasoner.reason() never raises on an LLM-side failure -- it
+        returns a string starting with "Error" instead. reason run must
+        surface that as a real command failure, not exit 0 with a fake
+        "answer"."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+
+        class _FailingGraphReasoner:
+            def __init__(self, config=None, **kwargs):
+                pass
+
+            def reason(self, graph, query, **options):
+                return "Error: LLM provider not initialized for GraphReasoner. Check your configuration."
+
+        monkeypatch.setattr(
+            "semantica.reasoning.GraphReasoner", _FailingGraphReasoner, raising=False)
+        result = runner.invoke(
+            cli_module.main, ["reason", "run", "--engine", "graph", "--query", "anything?"])
+        assert result.exit_code != 0
+        assert "LLM provider not initialized" in result.output
+        assert "Traceback" not in result.output
+
+    def test_load_rule_definitions_formats(self, tmp_path):
+        yaml_list = tmp_path / "list.yaml"
+        yaml_list.write_text('- IF A(?x) THEN B(?x)\n- IF B(?x) THEN C(?x)\n',
+                             encoding="utf-8")
+        assert cli_module._load_rule_definitions(str(yaml_list)) == [
+            "IF A(?x) THEN B(?x)", "IF B(?x) THEN C(?x)"]
+
+        yaml_map = tmp_path / "map.yaml"
+        yaml_map.write_text('rules:\n  - IF A(?x) THEN B(?x)\n', encoding="utf-8")
+        assert cli_module._load_rule_definitions(str(yaml_map)) == [
+            "IF A(?x) THEN B(?x)"]
+
+        plain = tmp_path / "rules.dl"
+        plain.write_text('# comment\nIF A(?x) THEN B(?x)\n\n', encoding="utf-8")
+        assert cli_module._load_rule_definitions(str(plain)) == [
+            "IF A(?x) THEN B(?x)"]
+
+    def test_run_empty_graph_returns_zero_facts(self, runner, monkeypatch):
+        """reason run with an empty graph store should not crash and report 0 facts."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(cli_module.main, ["--json", "reason", "run"])
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["facts"] == 0
+        assert data["inferred_count"] == 0
+        assert data["inferred_facts"] == []
+
+    def test_run_graph_store_error_surfaces_cleanly(self, runner, monkeypatch):
+        """A graph-store connectivity error must surface as a clean error, not a Traceback."""
+
+        def _bad_store(ctx):
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", _bad_store)
+        result = runner.invoke(cli_module.main, ["reason", "run"])
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "connection refused" in result.output
+
+    def test_run_no_rules_uses_empty_ruleset(self, runner, monkeypatch):
+        """reason run without --rules should still succeed (zero rules -> zero inferences)."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _FakeStore:
+            def get_nodes(self, limit=None):
+                return [{"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}}]
+
+            def get_relationships(self, limit=None):
+                return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _FakeStore())
+        result = runner.invoke(cli_module.main, ["--json", "reason", "run"])
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["facts"] == 1
+        assert data["inferred_count"] == 0
+
+    def test_load_rule_definitions_yaml_mapping_without_rules_key_raises(self, tmp_path):
+        """A YAML mapping with no 'rules' key must raise ClickException, not silently
+        pass the raw YAML lines as rules."""
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("some_key: some_value\nother_key: other_value\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="no 'rules' key"):
+            cli_module._load_rule_definitions(str(bad))
+
+    def test_load_rule_definitions_empty_file_returns_empty_list(self, tmp_path):
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("", encoding="utf-8")
+        assert cli_module._load_rule_definitions(str(empty)) == []
+
+    def test_load_rule_definitions_yaml_rules_null_falls_to_plaintext(self, tmp_path):
+        """rules: null is valid YAML with the key present; the null value is
+        not a list, so the function falls through to plain-text parsing and
+        returns the literal line (one no-op rule).  This documents the edge
+        case rather than asserting a specific useful behaviour."""
+        f = tmp_path / "null_rules.yaml"
+        f.write_text("rules: null\n", encoding="utf-8")
+        result = cli_module._load_rule_definitions(str(f))
+        # Plain-text fallback: the non-comment, non-blank line becomes a rule.
+        assert result == ["rules: null"]
+
+    def test_load_premises_formats(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        plain = tmp_path / "plain.yaml"
+        plain.write_text("- Person(Alice)\n- Person(Bob)\n", encoding="utf-8")
+        premises = cli_module._load_premises(str(plain))
+        assert [p.statement for p in premises] == ["Person(Alice)", "Person(Bob)"]
+        assert [p.confidence for p in premises] == [1.0, 1.0]
+
+        with_confidence = tmp_path / "confidence.yaml"
+        with_confidence.write_text(
+            "- {statement: 'Person(Alice)', confidence: 0.5}\n", encoding="utf-8")
+        premises = cli_module._load_premises(str(with_confidence))
+        assert premises[0].statement == "Person(Alice)"
+        assert premises[0].confidence == 0.5
+
+        mapping = tmp_path / "mapping.yaml"
+        mapping.write_text("premises:\n  - Person(Alice)\n", encoding="utf-8")
+        premises = cli_module._load_premises(str(mapping))
+        assert [p.statement for p in premises] == ["Person(Alice)"]
+
+    def test_load_premises_missing_statement_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("- {confidence: 0.5}\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="missing 'statement'"):
+            cli_module._load_premises(str(bad))
+
+    def test_load_premises_null_key_value_raises(self, tmp_path):
+        """A 'premises' key present but not a list (e.g. YAML null) must be
+        a clear error, not silently reinterpreted as one raw-text line
+        ("premises: null" itself becoming a bogus premise)."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("premises: null\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="not a list"):
+            cli_module._load_premises(str(bad))
+
+    def test_load_premises_empty_list_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("premises: []\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="no premises"):
+            cli_module._load_premises(str(empty))
+
+    def test_load_observations_formats(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        plain = tmp_path / "plain.yaml"
+        plain.write_text("- Human(Alice)\n", encoding="utf-8")
+        observations = cli_module._load_observations(str(plain))
+        assert [o.description for o in observations] == ["Human(Alice)"]
+
+        with_facts = tmp_path / "with_facts.yaml"
+        with_facts.write_text(
+            "- {description: 'Human(Alice)', facts: ['Person(Alice)']}\n", encoding="utf-8")
+        observations = cli_module._load_observations(str(with_facts))
+        assert observations[0].description == "Human(Alice)"
+        assert observations[0].facts == ["Person(Alice)"]
+
+        mapping = tmp_path / "mapping.yaml"
+        mapping.write_text("observations:\n  - Human(Alice)\n", encoding="utf-8")
+        observations = cli_module._load_observations(str(mapping))
+        assert [o.description for o in observations] == ["Human(Alice)"]
+
+    def test_load_observations_missing_description_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("- {facts: []}\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="missing 'description'"):
+            cli_module._load_observations(str(bad))
+
+    def test_load_observations_null_key_value_raises(self, tmp_path):
+        """A 'observations' key present but not a list (e.g. YAML null)
+        must be a clear error. Previously this fell through to
+        reinterpreting the raw file text as plain lines, turning
+        "observations: null" itself into one bogus Observation and letting
+        `reason run --engine abductive` report a misleading success."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("observations: null\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="not a list"):
+            cli_module._load_observations(str(bad))
+
+    def test_load_observations_empty_list_raises(self, tmp_path):
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("observations: []\n", encoding="utf-8")
+        import click as _click
+        with pytest.raises(_click.ClickException, match="no observations"):
+            cli_module._load_observations(str(empty))
+
+    def test_run_deductive_no_rules_uses_empty_ruleset(self, runner, monkeypatch):
+        """--engine deductive is wired to DeductiveReasoner.apply_logic() (#1478);
+        it must no longer be rejected -- zero rules just means zero conclusions,
+        matching the rete/datalog no-op-ruleset convention."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+
+        class _EmptyStore:
+            def get_nodes(self, limit=None): return []
+            def get_relationships(self, limit=None): return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _EmptyStore())
+        result = runner.invoke(
+            cli_module.main, ["--json", "reason", "run", "--engine", "deductive"])
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["engine"] == "deductive"
+        assert data["facts"] == 0
+        assert data["inferred_count"] == 0
+        assert data["inferred_facts"] == []
 
     def test_explain_requires_conclusion(self, runner):
         result = runner.invoke(cli_module.main, ["reason", "explain"])
@@ -1350,6 +2073,65 @@ class TestStore:
         result = runner.invoke(cli_module.main, ["store", "connect", "--backend", "neo4j"])
         _ok(result)
 
+    def test_connect_dispatches_through_graph_store(self, runner, monkeypatch):
+        # store connect used to call get_graph_store_method(backend) — the
+        # method registry, which needs (task, method_name) — so it raised a
+        # TypeError before any connection attempt (#1354).
+        calls = {}
+
+        class _FakeGraphStore:
+            def __init__(self, backend=None, **cfg):
+                calls["backend"] = backend
+                calls["cfg"] = cfg
+
+            def connect(self):
+                calls["connected"] = True
+                return True
+
+        import semantica.graph_store as gs_mod
+        monkeypatch.setattr(gs_mod, "GraphStore", _FakeGraphStore)
+        result = runner.invoke(cli_module.main, [
+            "store", "connect", "--backend", "neo4j",
+            "--uri", "bolt://example:7687", "--json"])
+        _ok(result)
+        data = _json_output(result)
+        assert data == {"backend": "neo4j", "connected": True}
+        assert calls["backend"] == "neo4j"
+        assert calls["cfg"].get("uri") == "bolt://example:7687"
+        assert calls.get("connected") is True
+
+    def test_connect_invalid_backend_reports_error_not_dispatch_error(self, runner):
+        """An unknown backend name must produce a meaningful backend error, not a
+        Python TypeError from the old get_graph_store_method() dispatch (#1354)."""
+        result = runner.invoke(cli_module.main,
+                               ["store", "connect", "--backend", "does-not-exist"])
+        # Exit 0 because store_connect always catches and reports errors gracefully.
+        _ok(result)
+        # The output must mention the backend, not a Python internal error.
+        assert "does-not-exist" in result.output
+        assert "TypeError" not in result.output
+        assert "Traceback" not in result.output
+
+    def test_connect_backend_error_surfaces_in_json(self, runner, monkeypatch):
+        """A connect() failure must appear in JSON output as connected=False with an error field."""
+
+        class _FailingStore:
+            def __init__(self, backend=None, **cfg):
+                pass
+
+            def connect(self):
+                raise RuntimeError("auth failed")
+
+        import semantica.graph_store as gs_mod
+        monkeypatch.setattr(gs_mod, "GraphStore", _FailingStore)
+        result = runner.invoke(cli_module.main, [
+            "store", "connect", "--backend", "neo4j", "--json"])
+        _ok(result)
+        data = _json_output(result)
+        assert data["connected"] is False
+        assert "auth failed" in data.get("error", "")
+        assert data["backend"] == "neo4j"
+
     def test_migrate_dry_run(self, runner):
         result = runner.invoke(cli_module.main, ["store", "migrate",
                                       "--from", "faiss", "--to", "qdrant", "--dry-run"])
@@ -1358,6 +2140,183 @@ class TestStore:
     def test_migrate_requires_from_and_to(self, runner):
         result = runner.invoke(cli_module.main, ["store", "migrate", "--from", "faiss"])
         assert result.exit_code != 0
+
+    def test_migrate_refuses_unsupported_backend_pair(self, runner):
+        result = runner.invoke(cli_module.main, ["store", "migrate",
+                                      "--from", "faiss", "--to", "qdrant"])
+        assert result.exit_code != 0
+        # Rich may wrap the error message across lines; check for each backend
+        # name individually rather than the exact comma-joined string.
+        output = result.output
+        assert "faiss" in output
+        assert "pgvector" in output
+        assert "sqlite" in output
+
+    def _fake_migrate_store_module(self, source_items, stored, dest_configs=None):
+        class _FakeBackendStore:
+            def __init__(self, dimension=None):
+                self.dimension = dimension
+
+        class _FakeStore:
+            def __init__(self, backend, config=None, **kw):
+                self.backend = backend
+                self._config = config or {}
+                dim = self._config.get("dimension")
+                self._backend_store = _FakeBackendStore(dimension=dim)
+                if dest_configs is not None:
+                    dest_configs[backend] = dict(self._config)
+
+            def iter_vectors(self, batch_size=500):
+                if self.backend == "sqlite":
+                    yield from source_items
+                    return
+                return
+                yield  # pragma: no cover - makes this a generator for other backends
+
+            def store_vectors(self, vectors, metadata, ids=None):
+                for vec_id, meta in zip(ids, metadata):
+                    stored[vec_id] = meta
+
+        return _fake_module(VectorStore=_FakeStore)
+
+    def test_migrate_runs_between_supported_backends(self, runner, monkeypatch):
+        source_items = [
+            {"id": "a", "vector": [0.1, 0.2], "metadata": {"tag": "x"}},
+            {"id": "b", "vector": [0.3, 0.4], "metadata": {}},
+        ]
+        stored = {}
+        fake_vs = self._fake_migrate_store_module(source_items, stored)
+        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+
+        result = runner.invoke(cli_module.main, ["store", "migrate",
+                                      "--from", "sqlite", "--to", "pgvector",
+                                      "--namespace", "prod", "--json"])
+        _ok(result)
+        data = _json_output(result)
+        assert data == {"from": "sqlite", "to": "pgvector", "migrated": 2}
+        assert stored == {"a": {"tag": "x", "namespace": "prod"}, "b": {"namespace": "prod"}}
+
+    def test_migrate_reports_zero_for_empty_source(self, runner, monkeypatch):
+        stored = {}
+        fake_vs = self._fake_migrate_store_module([], stored)
+        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+
+        result = runner.invoke(cli_module.main, ["store", "migrate",
+                                      "--from", "sqlite", "--to", "pgvector", "--json"])
+        _ok(result)
+        assert _json_output(result)["migrated"] == 0
+        assert stored == {}
+
+    def test_migrate_inherits_source_dimension_into_dest(self, runner, monkeypatch):
+        source_items = [{"id": "a", "vector": [0.1, 0.2, 0.3], "metadata": {}}]
+        stored = {}
+        dest_configs: dict = {}
+        fake_vs = self._fake_migrate_store_module(source_items, stored, dest_configs)
+        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+        monkeypatch.setattr(
+            cli_module.Config, "to_dict",
+            lambda self: {"vector_store": {"sqlite": {"dimension": 3}, "pgvector": {}}},
+        )
+
+        result = runner.invoke(cli_module.main, ["store", "migrate",
+                                      "--from", "sqlite", "--to", "pgvector", "--json"])
+        _ok(result)
+        assert dest_configs["pgvector"].get("dimension") == 3
+
+    def test_migrate_retry_reloads_persisted_faiss_state(
+        self, runner, monkeypatch, tmp_path
+    ):
+        pytest.importorskip("faiss")
+        import numpy as np
+
+        from semantica.vector_store.faiss_store import FAISSStore
+
+        index_path = tmp_path / "migrated.faiss"
+        source_items = [
+            {"id": "a", "vector": [0.1, 0.2, 0.3], "metadata": {"tag": "x"}},
+            {"id": "b", "vector": [0.4, 0.5, 0.6], "metadata": {"tag": "y"}},
+        ]
+
+        class _SourceBackend:
+            dimension = 3
+
+        class _MigrationStore:
+            def __init__(self, backend, config=None, **kw):
+                self.backend = backend
+                if backend == "sqlite":
+                    self._backend_store = _SourceBackend()
+                else:
+                    self._backend_store = FAISSStore(dimension=3)
+                    self._backend_store.create_index(index_type="flat")
+
+            def iter_vectors(self, batch_size=500):
+                if self.backend == "sqlite":
+                    yield from source_items
+
+            def store_vectors(self, vectors, metadata, ids=None):
+                self._backend_store.add_vectors(
+                    np.asarray(vectors, dtype=np.float32),
+                    ids=ids,
+                    metadata=metadata,
+                )
+
+        fake_vs = _fake_module(VectorStore=_MigrationStore)
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.vector_store", fake_vs
+        )
+        monkeypatch.setattr(
+            cli_module.Config,
+            "to_dict",
+            lambda self: {
+                "vector_store": {
+                    "sqlite": {"dimension": 3},
+                    "faiss": {"dimension": 3, "index_path": str(index_path)},
+                }
+            },
+        )
+
+        command = [
+            "store",
+            "migrate",
+            "--from",
+            "sqlite",
+            "--to",
+            "faiss",
+            "--json",
+        ]
+        first_result = runner.invoke(cli_module.main, command)
+        _ok(first_result)
+
+        first_load = FAISSStore(dimension=3)
+        first_load.load_index(index_path, index_type="flat")
+        assert first_load.index.vector_ids == ["a", "b"]
+        assert first_load.index.index.ntotal == 2
+
+        retry_result = runner.invoke(cli_module.main, command)
+        _ok(retry_result)
+
+        retry_load = FAISSStore(dimension=3)
+        retry_load.load_index(index_path, index_type="flat")
+        assert retry_load.index.vector_ids == ["a", "b"]
+        assert retry_load.index.index.ntotal == 2
+
+    def test_migrate_faiss_source_requires_index_path(self, runner, monkeypatch):
+        fake_vs = _fake_module(VectorStore=lambda **kw: MagicMock())
+        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+
+        result = runner.invoke(cli_module.main, ["store", "migrate",
+                                      "--from", "faiss", "--to", "sqlite"])
+        assert result.exit_code != 0
+        assert "index_path" in result.output
+
+    def test_migrate_faiss_dest_requires_index_path(self, runner, monkeypatch):
+        fake_vs = _fake_module(VectorStore=lambda **kw: MagicMock())
+        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+
+        result = runner.invoke(cli_module.main, ["store", "migrate",
+                                      "--from", "sqlite", "--to", "faiss"])
+        assert result.exit_code != 0
+        assert "index_path" in result.output
 
     def test_flush_requires_confirm(self, runner):
         result = runner.invoke(cli_module.main, ["store", "flush"])
@@ -1700,12 +2659,16 @@ class TestMCP:
         # Table renders correctly — at minimum the column header is present
         assert "Tool" in result.output or "tool" in result.output.lower()
 
-    def test_list_tools_with_mock_shows_known_tools(self, runner, monkeypatch):
-        fake_tools = _fake_module(__all__=["extract_entities", "query_graph"])
-        monkeypatch.setitem(__import__("sys").modules, "mcp.tools", fake_tools)
+    def test_list_tools_reads_server_catalog(self, runner, monkeypatch):
+        """list-tools must read TOOL_DEFINITIONS (what the server serves via
+        tools/list), not the module's ``__all__`` (issue #1355)."""
+        import semantica_mcp.mcp.tools as tools_mod
+        fake = [{"name": "fake_tool_from_catalog", "description": "", "inputSchema": {},
+                 "_handler": lambda a: {}}]
+        monkeypatch.setattr(tools_mod, "TOOL_DEFINITIONS", fake)
         result = runner.invoke(cli_module.main, ["mcp", "list-tools"])
         _ok(result)
-        assert "extract_entities" in result.output
+        assert "fake_tool_from_catalog" in result.output
 
     def test_list_tools_json(self, runner):
         result = runner.invoke(cli_module.main, ["mcp", "list-tools", "--json"])
@@ -1724,14 +2687,63 @@ class TestMCP:
         assert "Traceback" not in result.output
         assert "Invalid JSON" in result.output
 
-    def test_call_import_error_is_clean(self, runner):
-        with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
-            (_ for _ in ()).throw(ImportError(n))
-            if n.startswith("mcp") else __import__(n, *a, **k)
-        )):
-            result = runner.invoke(cli_module.main, ["mcp", "call", "extract_entities"])
+    def test_call_failure_global_json_mode_keeps_stdout_clean(self, runner):
+        """Under global --json, stdout must stay machine-readable: failures are
+        emitted as structured JSON on stderr, never as a Rich panel on stdout."""
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "mcp", "call", "some_tool", "--args", "{bad json}"],
+        )
+        assert result.exit_code != 0
+        assert result.stdout == ""
+        err = json.loads(result.stderr)
+        assert err["error"].startswith("Invalid JSON in --args")
+        assert err["type"] == "ClickException"
+
+    def test_call_failure_local_json_mode_keeps_stdout_clean(self, runner):
+        """The subcommand's own --json flag promises the same stream contract."""
+        result = runner.invoke(
+            cli_module.main,
+            ["mcp", "call", "some_tool", "--args", "{bad json}", "--json"],
+        )
+        assert result.exit_code != 0
+        assert result.stdout == ""
+        err = json.loads(result.stderr)
+        assert err["error"].startswith("Invalid JSON in --args")
+
+    def test_call_dispatches_through_packaged_server(self, runner):
+        """Regression for issue #1355: ``mcp call`` dispatches in-process through
+        ``semantica_mcp.mcp.server`` (the server ``mcp start`` spawns) instead
+        of importing the nonexistent ``MCPSession``."""
+        result = runner.invoke(
+            cli_module.main, ["--json", "mcp", "call", "extract_entities"]
+        )
+        _ok(result)
+        # Empty args short-circuit before heavy imports; reaching the
+        # handler's own validation proves the dispatch path works.
+        assert "text is required" in result.output
+
+    def test_call_unknown_tool_fails_cleanly(self, runner):
+        result = runner.invoke(cli_module.main, ["mcp", "call", "no_such_tool"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+        assert "Unknown tool" in result.output
+
+    def test_call_non_object_args_rejected(self, runner):
+        result = runner.invoke(
+            cli_module.main, ["mcp", "call", "extract_entities", "--args", "[1, 2]"]
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "--args must be a JSON object" in result.output
+
+    def test_list_tools_json_matches_server_catalog(self, runner):
+        """The CLI catalog and the MCP server catalog must be the same list."""
+        from semantica_mcp.mcp.tools import TOOL_DEFINITIONS
+        result = runner.invoke(cli_module.main, ["mcp", "list-tools", "--json"])
+        _ok(result)
+        data = _json_output(result)
+        assert data["tools"] == [t["name"] for t in TOOL_DEFINITIONS]
 
 
 # ─── services group (backward-compat wrapper) ─────────────────────────────────
@@ -1888,7 +2900,7 @@ class TestDoctorEmbeddings:
         checks = self._doctor_checks(runner)
         st = checks["Embeddings (sentence-transformers)"]
         assert st["status"] == "fail"
-        assert st["hint"] == "pip install sentence-transformers"
+        assert st["hint"] == "pip install 'semantica[embeddings-local]'"
 
     def test_deep_probe_detects_fallback_active(self, runner, monkeypatch):
         self._with_fake_st(monkeypatch)
@@ -1974,6 +2986,160 @@ class TestDoctorEmbeddingHintsAndEnv:
         st = checks["Embeddings (sentence-transformers)"]
         assert st["status"] == "fail"
         assert "hash fallback" in st["note"], "padded/caps env value must enable deep mode"
+
+
+class TestDoctorTableLayout:
+    """#1428 + Qodo review: doctor table must keep Check labels and Hint text
+    readable at a normal 80-column terminal.
+
+    These tests render the *human-readable* (non-JSON) doctor table into a
+    captured 80-column Rich console so they cover the actual column-width
+    arithmetic, not just the JSON data.
+
+    Two regressions are protected:
+
+    A. #1428 — Hint (and Note) columns must not collapse into unreadable
+       single-character fragments or be silently truncated with a layout '…'.
+       overflow="fold" on both columns ensures content wraps across lines while
+       remaining fully present.
+
+    B. Qodo — Long Check labels such as "Embeddings (sentence-transformers)"
+       must not be truncated/ellipsized.  Assigning ratio=1 to the Check column
+       (as the original PR did) caused Rich to squeeze it below its min_width
+       at narrow terminals, so the fix removes ratio from the fixed-size columns.
+    """
+
+    def _render_doctor_at_80(self, runner, monkeypatch):
+        """Return the plain-text (ANSI-stripped) doctor table rendered at 80 cols."""
+        import io
+        import re
+        from rich.console import Console
+
+        # Unset LLM-provider env vars so the warn rows (with hints) are always present.
+        for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+
+        buf = io.StringIO()
+        narrow_console = Console(
+            file=buf, width=80, highlight=False, force_terminal=True, no_color=True
+        )
+        monkeypatch.setattr(cli_module, "console", narrow_console)
+
+        result = runner.invoke(cli_module.main, ["doctor"])
+        assert result.exit_code == 0, f"doctor exited non-zero: {result.output!r}"
+
+        return re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+
+    def _hint_column_parts(self, output: str) -> "list[str]":
+        """Extract non-blank Hint-column segments from each rendered line.
+
+        Locates the Hint column start from the header row and slices that
+        suffix from every subsequent line, so the test is insensitive to the
+        exact widths of the other columns.
+        """
+        lines = output.splitlines()
+        # Line 0 is blank (console.print() blank line before table).
+        hdr = next((l for l in lines if "Hint" in l and "Check" in l), None)
+        assert hdr is not None, "Could not find table header in doctor output"
+        hint_start = hdr.index("Hint")
+
+        parts = []
+        for line in lines:
+            if len(line) > hint_start:
+                seg = line[hint_start:].rstrip()
+                if seg and seg != "Hint" and not set(seg).issubset({"─", " "}):
+                    parts.append(seg)
+        return parts
+
+    # ── B: Qodo regression ────────────────────────────────────────────────────
+
+    def test_long_check_label_not_truncated_at_80_cols(self, runner, monkeypatch):
+        """'Embeddings (sentence-transformers)' must appear verbatim at 80 cols.
+
+        Before the fix, ratio=1 on the Check column let Rich squeeze it below
+        its min_width, turning the label into 'Embedd…' or similar.
+        """
+        output = self._render_doctor_at_80(runner, monkeypatch)
+        assert "Embeddings (sentence-transformers)" in output, (
+            "Check label 'Embeddings (sentence-transformers)' was truncated in "
+            "the 80-column doctor table — the ratio= constraint on the Check "
+            "column must be removed so min_width=34 is always honoured."
+        )
+
+    def test_all_check_labels_not_truncated_at_80_cols(self, runner, monkeypatch):
+        """Every standard Check label must appear verbatim at 80 cols."""
+        output = self._render_doctor_at_80(runner, monkeypatch)
+        for label in (
+            "Python",
+            "semantica",
+            "rich",
+            "Graph store",
+            "Vector store",
+            "Embeddings (sentence-transformers)",
+            "Embeddings (fastembed)",
+            "OpenAI",
+            "Anthropic",
+            "Groq",
+            "Config file",
+            "Log directory",
+        ):
+            assert label in output, (
+                f"Check label {label!r} was truncated or missing in the "
+                "80-column doctor table."
+            )
+
+    # ── A: #1428 regression ───────────────────────────────────────────────────
+
+    def test_hint_content_fully_present_at_80_cols(self, runner, monkeypatch):
+        """The LLM-provider hints must be fully present (folded, not ellipsized).
+
+        With overflow='fold' the full hint text wraps across lines; no
+        characters are discarded.  Joining the Hint-column segments (stripping
+        whitespace) must reconstruct each complete hint string.
+        """
+        import re
+
+        output = self._render_doctor_at_80(runner, monkeypatch)
+        parts = self._hint_column_parts(output)
+        hint_joined = re.sub(r"\s+", "", "".join(parts))
+
+        # Each LLM-provider hint must be fully recoverable from the folded lines.
+        for expected in (
+            "exportOPENAI_API_KEY=\u2026",       # export OPENAI_API_KEY=…
+            "exportANTHROPIC_API_KEY=\u2026",    # export ANTHROPIC_API_KEY=…
+            "exportGROQ_API_KEY=\u2026",         # export GROQ_API_KEY=…
+        ):
+            assert expected in hint_joined, (
+                f"Hint content {expected!r} is missing from the 80-column "
+                "doctor table — overflow='fold' must be set on the Hint column "
+                "so no content is silently discarded."
+            )
+
+    def test_hint_column_has_no_single_char_fragments_at_80_cols(
+        self, runner, monkeypatch
+    ):
+        """No Hint-column line must be a single alphabetic character.
+
+        The original #1428 bug produced outputs like:
+            export
+            O
+            P
+            E
+            N
+            A
+            I
+            ...
+        because Rich allocated the Hint column only 1–2 characters of content
+        width.  overflow='fold' on a properly-wide column eliminates this.
+        """
+        output = self._render_doctor_at_80(runner, monkeypatch)
+        parts = self._hint_column_parts(output)
+        single_char_alpha = [p for p in parts if len(p.strip()) == 1 and p.strip().isalpha()]
+        assert not single_char_alpha, (
+            f"Hint column contains single-character lines {single_char_alpha!r} "
+            "at 80 columns — the Hint column is too narrow; check min_width and "
+            "ratio settings."
+        )
 
 
 class TestEmbedGenerateOutput:
