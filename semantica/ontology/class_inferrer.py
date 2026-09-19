@@ -110,6 +110,10 @@ class ClassInferrer:
             **options: Additional options:
                 - build_hierarchy: Whether to build class hierarchy (default: True)
                 - namespace_manager: Optional namespace manager for URI generation
+                - min_occurrences: Per-call frequency gate, overriding the
+                  constructor default for this invocation (default: constructor
+                  value). Mirrors ``PropertyGenerator`` so a single per-call
+                  threshold consistently gates both classes and predicates.
 
         Returns:
             List of inferred class definition dictionaries, each containing:
@@ -142,11 +146,35 @@ class ClassInferrer:
             self.progress_tracker.update_tracking(
                 tracking_id, message="Grouping entities by type..."
             )
+            # Per-call gate overrides the constructor value (PropertyGenerator
+            # already reads options; this keeps class and predicate gating aligned).
+            min_occurrences = options.get("min_occurrences", self.min_occurrences)
+
             # Group entities by type
             entity_types = defaultdict(list)
             for entity in entities:
                 entity_type = entity.get("type") or entity.get("entity_type", "Entity")
                 entity_types[entity_type].append(entity)
+
+            normalized_types = defaultdict(list)
+            for entity_type, type_entities in entity_types.items():
+                if len(type_entities) >= min_occurrences:
+                    normalized_name = self.naming_conventions.normalize_class_name(
+                        str(entity_type)
+                    )
+                    normalized_types[normalized_name].append(str(entity_type))
+
+            collisions = {
+                normalized_name: source_types
+                for normalized_name, source_types in normalized_types.items()
+                if len(source_types) > 1
+            }
+            if collisions:
+                raise ValidationError(
+                    "Entity types normalize to duplicate class names; "
+                    "rename the source types or provide an explicit mapping.",
+                    validation_context={"normalized_type_collisions": collisions},
+                )
 
             # Infer classes from entity types
             self.progress_tracker.update_tracking(
@@ -155,7 +183,7 @@ class ClassInferrer:
             )
             classes = []
             for entity_type, type_entities in entity_types.items():
-                if len(type_entities) >= self.min_occurrences:
+                if len(type_entities) >= min_occurrences:
                     class_def = self._create_class_from_entities(
                         entity_type, type_entities, **options
                     )

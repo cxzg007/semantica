@@ -3,11 +3,11 @@ title: "LLM Integrations"
 description: "Connect Semantica to Groq, OpenAI, Anthropic, HuggingFace, Novita AI, and 100+ LLM providers through a unified interface."
 ---
 
-Semantica exposes a unified provider interface — a single `.generate()` method — across Groq, OpenAI, Anthropic Claude, HuggingFace, Novita AI, and 100+ providers via LiteLLM. Use it when you need to swap providers for latency, accuracy, cost, or data-residency reasons without touching application code.
+Semantica exposes a unified provider interface — the same `.generate()`, `.generate_structured()` and `.generate_typed()` methods — across Groq, OpenAI, Anthropic Claude, HuggingFace, Novita AI, and 100+ providers via LiteLLM. Use it when you need to swap providers for latency, accuracy, cost, or data-residency reasons without touching application code.
 
 ## What Are LLM Integrations?
 
-The `semantica.llms` module provides a unified interface for connecting to Large Language Model providers. Instead of learning different APIs for each provider, you use the same methods (`.generate()`, `.generate_structured()`) regardless of whether you're calling Groq, OpenAI, Anthropic, or local HuggingFace models.
+The `semantica.llms` module provides a unified interface for connecting to Large Language Model providers. Instead of learning different APIs for each provider, you use the same methods (`.generate()`, `.generate_structured()`, `.generate_typed()`) regardless of whether you're calling Groq, OpenAI, Anthropic, or local HuggingFace models.
 
 **Unified interface across providers:** All LLM providers in Semantica expose identical methods, so switching from OpenAI to Anthropic requires changing only the provider constructor, not your application code.
 
@@ -19,7 +19,7 @@ The `semantica.llms` module provides a unified interface for connecting to Large
 
 **Reduced vendor lock-in.** Avoid tying your application to a single LLM provider's API. If pricing changes or service availability issues arise, switching providers is straightforward.
 
-**Consistent APIs.** Use the same `.generate()` and `.generate_structured()` methods across all providers instead of learning provider-specific interfaces.
+**Consistent APIs.** Use the same `.generate()`, `.generate_structured()`, and `.generate_typed()` methods across all providers instead of learning provider-specific interfaces.
 
 **Multi-provider workflows.** Run fast models for initial classification and expensive frontier models for complex reasoning in the same pipeline.
 
@@ -70,15 +70,16 @@ The unified interface means you can prototype with Groq for speed, validate accu
 
 ## The Shared Interface
 
-Every provider exposes the same two methods:
+Every provider exposes the same methods:
 
 ```python
 provider.generate(prompt: str, **kwargs) -> str
-provider.generate_structured(prompt: str, **kwargs) -> dict
+provider.generate_structured(prompt: str, **kwargs) -> dict | list
+provider.generate_typed(prompt: str, schema: Type[BaseModel], max_retries: int = 3, **kwargs) -> BaseModel
 provider.is_available() -> bool
 ```
 
-`generate()` returns a plain string. `generate_structured()` instructs the model to respond in JSON and returns a parsed `dict`. `is_available()` lets you health-check the provider before committing to a call — useful in retry logic and warm-up checks.
+`generate()` returns a plain string. `generate_structured()` instructs the model to respond in JSON and returns the parsed result — a `dict` for a top-level JSON object, or a `list` if the model returns a top-level JSON array. `generate_typed()` takes a Pydantic model, validates the model's output against it, and retries up to `max_retries` times with the validation error fed back into the prompt — reach for it when downstream code needs a guaranteed shape rather than best-effort JSON. `is_available()` lets you health-check the provider before committing to a call — useful in retry logic and warm-up checks.
 
 This means every place in Semantica that accepts an LLM — `query_with_reasoning()`, semantic extraction, custom reasoning loops — accepts any of these providers interchangeably.
 
@@ -275,20 +276,20 @@ print(data)
 
 **LiteLLM** is a universal adapter that provides a single interface to over 100 different LLM providers, including Anthropic Claude, Azure OpenAI, AWS Bedrock, Google Vertex AI, and local Ollama instances. It acts as a translation layer, converting your unified API calls into provider-specific requests, enabling easy switching between providers without code changes.
 
-`LiteLLM` is the Swiss Army knife. It wraps the `litellm` library, which speaks to every major provider using a unified completion API. The model string encodes both provider and model name: `"anthropic/claude-sonnet-4-20250514"`, `"azure/gpt-4o"`, `"bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0"`, `"ollama/llama3.2"`. Change the string, change the provider — no other code changes needed.
+`LiteLLM` is the Swiss Army knife. It wraps the `litellm` library, which speaks to every major provider using a unified completion API. The model string encodes both provider and model name: `"anthropic/claude-sonnet-5"`, `"azure/gpt-4o"`, `"bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"`, `"ollama/llama3.2"`. Change the string, change the provider — no other code changes needed.
 
 ```python
 from semantica.llms import LiteLLM
 
 # Anthropic Claude — highest accuracy for complex reasoning
-llm = LiteLLM(model="anthropic/claude-sonnet-4-20250514")
+llm = LiteLLM(model="anthropic/claude-sonnet-5")
 # Reads ANTHROPIC_API_KEY from environment
 
 # Azure OpenAI — compliance and data-residency requirements
 llm = LiteLLM(model="azure/gpt-4o", api_key="YOUR_AZURE_KEY")
 
 # AWS Bedrock — existing cloud agreement, no new vendor
-llm = LiteLLM(model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
+llm = LiteLLM(model="bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0")
 
 # Google Vertex AI
 llm = LiteLLM(model="vertex_ai/gemini-1.5-pro")
@@ -306,7 +307,7 @@ The environment-variable convention for each provider: `ANTHROPIC_API_KEY`, `AZU
 import os
 
 PROVIDER_MAP = {
-    "prod":    "anthropic/claude-sonnet-4-20250514",
+    "prod":    "anthropic/claude-sonnet-5",
     "staging": "openai/gpt-4o-mini",
     "local":   "ollama/llama3.2",
     "azure":   "azure/gpt-4o",
@@ -378,7 +379,7 @@ print("FAST: {}  (conf={:.0%})".format(fast_result["response"], fast_result["con
 
 # Tier 2: deep answer with Claude if confidence is below threshold
 if fast_result["confidence"] < 0.85:
-    deep_llm = LiteLLM(model="anthropic/claude-sonnet-4-20250514")
+    deep_llm = LiteLLM(model="anthropic/claude-sonnet-5")
     deep_result = context.query_with_reasoning(
         query, llm_provider=deep_llm, max_results=15, max_hops=3
     )
@@ -574,7 +575,7 @@ print("TRIAGE: {} (conf={:.0%})".format(triage["response"], triage["confidence"]
 
 # Tier 2: escalate to Claude for deep analysis if Tier 1 is uncertain
 if triage["confidence"] < 0.88:
-    deep_llm = LiteLLM(model="anthropic/claude-sonnet-4-20250514")
+    deep_llm = LiteLLM(model="anthropic/claude-sonnet-5")
     deep = context.query_with_reasoning(
         "Full MITRE ATT&CK analysis of this alert: identify the attack chain, "
         "blast radius, affected systems, and recommended containment steps.",
@@ -630,7 +631,7 @@ for d in drugs:
 # trastuzumab (conf=0.98), pertuzumab (conf=0.97), docetaxel (conf=0.96)
 
 # Report synthesis with Claude — switch to azure/gpt-4o for HIPAA by changing one string
-report_llm = LiteLLM(model="anthropic/claude-sonnet-4-20250514")
+report_llm = LiteLLM(model="anthropic/claude-sonnet-5")
 # For HIPAA-constrained Azure deployment:
 # report_llm = LiteLLM(model="azure/gpt-4o", api_key="YOUR_AZURE_KEY")
 
@@ -682,7 +683,7 @@ question = (
 
 # Two-provider consensus — same query, same graph, different LLMs
 gpt4o  = OpenAI(model="gpt-4o", api_key="YOUR_OAI_KEY")
-claude = LiteLLM(model="anthropic/claude-sonnet-4-20250514")
+claude = LiteLLM(model="anthropic/claude-sonnet-5")
 
 answer_a = context.query_with_reasoning(question, llm_provider=gpt4o,  max_results=10)
 answer_b = context.query_with_reasoning(question, llm_provider=claude, max_results=10)
@@ -711,7 +712,7 @@ for src in best["sources"]:
 
 **Using LLMs for deterministic pattern matching that regex can handle.** If your task is extracting email addresses, phone numbers, or other pattern-based entities, regular expressions are faster, cheaper, and more reliable than LLM extraction. Use LLMs when context, ambiguity, or domain knowledge matter for correct interpretation.
 
-**Not validating structured outputs.** The `generate_structured()` method returns parsed JSON, but LLMs can still produce malformed or incomplete structures. Always validate the returned dictionary against your expected schema before using the data downstream.
+**Not validating structured outputs.** The `generate_structured()` method returns parsed JSON (a dict, or a list for a top-level array), but LLMs can still produce malformed or incomplete structures. Validate the result against your expected schema before using it downstream — or use `generate_typed()`, which validates against a Pydantic model for you.
 
 **Switching providers without testing prompt behavior.** Different models respond differently to the same prompt. A prompt optimized for GPT-4 may produce poor results with Llama or Claude. When switching providers, test your prompts and adjust temperature, instructions, or examples as needed.
 
@@ -719,7 +720,7 @@ for src in best["sources"]:
 
 ## Related Guides
 
-- [Agent Memory](agent-memory) — using `query_with_reasoning()` with any LLM provider for graph-grounded retrieval
-- [Multi-Agent Systems](multi-agent) — wiring different LLM providers to different agent tiers in a shared-graph pipeline
-- [Semantic Extraction](semantic-extraction) — LLM-powered NER, relation extraction, event detection, and triplet extraction
-- [GraphRAG](graphrag) — multi-hop graph reasoning with `query_with_reasoning()`
+- [Agent Memory](/guides/agent-memory) — using `query_with_reasoning()` with any LLM provider for graph-grounded retrieval
+- [Multi-Agent Systems](/guides/multi-agent) — wiring different LLM providers to different agent tiers in a shared-graph pipeline
+- [Semantic Extraction](/guides/semantic-extraction) — LLM-powered NER, relation extraction, event detection, and triplet extraction
+- [GraphRAG](/guides/graphrag) — multi-hop graph reasoning with `query_with_reasoning()`

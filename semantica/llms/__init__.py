@@ -5,6 +5,12 @@ This module provides clean, intuitive imports for LLM providers used in Semantic
 It wraps the underlying provider functionality from semantica.semantic_extract.providers
 to provide a cleaner API.
 
+Every provider wrapper exposes the same generation interface:
+    - generate(prompt, **kwargs) -> str
+    - generate_structured(prompt, **kwargs) -> dict | list
+    - generate_typed(prompt, schema, max_retries=3, **kwargs) -> BaseModel
+    - is_available() -> bool
+
 Supported Providers:
     - Groq: Groq API for fast inference
     - OpenAI: OpenAI API (GPT-3.5, GPT-4, etc.)
@@ -35,7 +41,7 @@ Example Usage:
     >>> llm = LiteLLM(model="openai/gpt-4o", api_key="your-key")
     >>> response = llm.generate("Hello, world!")
     >>> # Or use other providers via LiteLLM
-    >>> llm = LiteLLM(model="anthropic/claude-sonnet-4-20250514")
+    >>> llm = LiteLLM(model="anthropic/claude-sonnet-5")
     >>> response = llm.generate("Hello, world!")
     >>>
     >>> # Anthropic provider

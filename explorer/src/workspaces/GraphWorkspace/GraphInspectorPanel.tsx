@@ -2,8 +2,10 @@ import type { CSSProperties } from "react";
 import { Loader2 } from "lucide-react";
 import { graph } from "../../store/graphStore";
 import { GRAPH_THEME, withAlpha } from "./graphTheme";
-import type { GraphSelectedNodeKind } from "./types";
+import type { FocusedUnavailableReason, GraphSelectedNodeKind } from "./types";
+import { focusedUnavailableReasonText } from "./graphViewCopy";
 import { MarkdownContentViewer } from "./MarkdownContentViewer";
+import type { MarkdownApplyResult } from "./markdownResourceClient";
 
 export type LinkPrediction = {
   target: string;
@@ -32,7 +34,7 @@ export interface GraphInspectorPanelProps {
   inspectableNodeId?: string | null;
   selectedNodeKind?: GraphSelectedNodeKind;
   canActivateFocused?: boolean;
-  focusedUnavailableReason?: string | null;
+  focusedUnavailableReason?: FocusedUnavailableReason | null;
   predictions: LinkPrediction[];
   predictionType: string;
   onPredictionTypeChange: (value: string) => void;
@@ -44,6 +46,8 @@ export interface GraphInspectorPanelProps {
   pathResult: PathResponse | null;
   onDownloadProvenance: (format: "json" | "markdown") => void;
   onFocusNode?: (nodeId: string) => void;
+  onMarkdownApplied?: (result: MarkdownApplyResult) => void;
+  onMarkdownDirtyChange?: (dirty: boolean) => void;
 }
 
 const PROVENANCE_KEYS = ["source", "source_url", "pmid", "pmids", "evidence", "provenance", "confidence"] as const;
@@ -304,6 +308,8 @@ export function GraphInspectorPanel({
   pathResult,
   onDownloadProvenance,
   onFocusNode,
+  onMarkdownApplied,
+  onMarkdownDirtyChange,
 }: GraphInspectorPanelProps) {
   if (!nodeId) {
     return (
@@ -341,8 +347,8 @@ export function GraphInspectorPanel({
           <div style={{ color: GRAPH_THEME.ui.text.strong, fontWeight: 600, marginBottom: 6 }}>Selected item is not directly inspectable in the current graph.</div>
           <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, lineHeight: 1.6 }}>
             {canActivateFocused
-              ? "Activate Focused mode to resolve this grouped selection to its canonical node."
-              : (focusedUnavailableReason ?? "Focused mode is unavailable for the current selection.")}
+              ? "Use Focus to resolve this grouped selection to its canonical node."
+              : focusedUnavailableReasonText(focusedUnavailableReason)}
           </div>
         </div>
       </aside>
@@ -393,7 +399,7 @@ export function GraphInspectorPanel({
             <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, lineHeight: 1.6 }}>
               {canActivateFocused
                 ? `Canonical node available: ${effectiveNodeId}`
-                : (focusedUnavailableReason ?? "Focused mode is unavailable for the current selection.")}
+                : focusedUnavailableReasonText(focusedUnavailableReason)}
             </div>
           </div>
         ) : null}
@@ -414,19 +420,18 @@ export function GraphInspectorPanel({
         </div>
       ) : null}
 
-      {/* Content Section — only rendered when the node carries actual content.
-           This matches the existing inspector convention: sections that have no
-           data for the current node are either hidden (temporal bounds) or closed
-           by default (Source Attribution, Properties).  Always showing an open
-           empty panel would add noise for every relationship/predicate node. */}
-      {nodeContent && (
-        <details className="node-panel-collapse" open>
-          <summary className="node-panel-summary">Content</summary>
-          <div className="node-panel-body" style={{ marginTop: 8 }}>
-            <MarkdownContentViewer content={nodeContent} />
-          </div>
-        </details>
-      )}
+      {/* Canonical nodes remain editable even when their current body is empty. */}
+      <details className="node-panel-collapse" open>
+        <summary className="node-panel-summary">Content</summary>
+        <div className="node-panel-body" style={{ marginTop: 8 }}>
+          <MarkdownContentViewer
+            content={nodeContent}
+            resource={{ kind: "context-node", id: effectiveNodeId }}
+            onApplied={onMarkdownApplied}
+            onDirtyChange={onMarkdownDirtyChange}
+          />
+        </div>
+      </details>
 
       {/* Actions */}
       <section style={sectionStyle}>
