@@ -84,9 +84,16 @@ assert graph["relationships"][0]["valid_until"] == "2026-09-30T00:00:00Z"
 ## Graph input and history
 
 Pass a dictionary containing `entities` and `relationships`; callers with a
-`ContextGraph` can export `to_kg_dict()` first. The caller must supply and retain
-the full managed evidence history, including superseded relationship versions.
+`ContextGraph` can export `to_kg_dict()` first and pass the result unchanged.
+The caller must supply and retain the full managed evidence history, including
+superseded relationship versions.
 Exporting only an active view cannot reconstruct evidence that it omits.
+
+With `ContextGraph`, the annotation and the bounds are ordinary keyword
+arguments: `graph.add_edge(source, target, relation_type, valid_from=...,
+valid_until=..., recorded_at=..., truth_maintenance={"support_id": ...,
+"fact": ...})`. Extra keyword arguments are stored in edge metadata, so do not
+wrap them in an explicit `metadata=` dictionary.
 
 Each managed relationship has a `metadata.truth_maintenance` dictionary with
 exactly `support_id` and `fact`. The fact uses PR1's canonical atom grammar; no
@@ -95,7 +102,12 @@ identifies **one source assertion revision**. Use distinct IDs for different
 facts from the same document and for later revisions. Unannotated relationships
 are ignored; malformed annotations raise `ValidationError`.
 
-Temporal fields are top-level fields on each relationship:
+Temporal fields are read from each record itself and, when present, from its
+`metadata` and `properties` dictionaries. That second location matters because
+`ContextGraph` keeps everything except the valid-time bounds inside `metadata`
+(entities also expose it through `properties`), so `to_kg_dict()` output works
+without rewriting. A field supplied in more than one place must denote the same
+instant; conflicting duplicates raise `TemporalValidationError`.
 
 | Field | Meaning | Default for managed evidence |
 |---|---|---|
@@ -103,6 +115,10 @@ Temporal fields are top-level fields on each relationship:
 | `valid_until` | Exclusive valid-time end | Unbounded future |
 | `recorded_at` | Inclusive known-time start | Required explicitly |
 | `superseded_at` | Exclusive known-time end | Unbounded future |
+
+Relationship endpoints are read from `source`/`target` or from the canonical
+`source_id`/`target_id` emitted by `to_kg_dict()`. Supplying both forms with
+different values raises `ValidationError` instead of silently preferring one.
 
 Null upper bounds, `"OPEN"`, and `TemporalBound.OPEN` mean unbounded future.
 Finite intervals require `start < end`. Times use the existing temporal parser:

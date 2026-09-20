@@ -12,6 +12,7 @@ from .truth_maintenance_types import FactSupport
 
 _BEGINNING = datetime.min.replace(tzinfo=timezone.utc)
 _ENGINE = TemporalReasoningEngine()
+_MISSING = object()
 
 
 def timestamp(value: Any, field: str) -> datetime:
@@ -125,16 +126,40 @@ def _validate_window_revision(old: Window, new: Window, key: str) -> None:
         raise ValidationError(f"Cannot change a closed transaction interval: {key}")
 
 
+def _bound(record: Dict[str, Any], field: str, *, open_ended: bool) -> Any:
+    """Resolve one bound from the canonical field and from exported containers.
+
+    ``ContextGraph.to_kg_dict()`` keeps properties other than the valid-time
+    bounds inside ``metadata`` (and, for entities, ``properties``), so a bound
+    that a caller supplied is only visible there. Duplicates are accepted when
+    they denote the same instant and rejected when they disagree.
+    """
+    resolved: Any = _MISSING
+    for container in (record, record.get("metadata"), record.get("properties")):
+        if not isinstance(container, dict):
+            continue
+        value = container.get(field)
+        if value is None:
+            continue
+        parsed = _end(value, field) if open_ended else timestamp(value, field)
+        if resolved is not _MISSING and parsed != resolved:
+            raise TemporalValidationError(f"Conflicting {field} values")
+        resolved = parsed
+    return resolved
+
+
 def _window(record: Dict[str, Any], *, require_recorded: bool) -> Window:
-    start = record.get("valid_from")
-    recorded = record.get("recorded_at")
-    if require_recorded and recorded is None:
+    start = _bound(record, "valid_from", open_ended=False)
+    until = _bound(record, "valid_until", open_ended=True)
+    recorded = _bound(record, "recorded_at", open_ended=False)
+    superseded = _bound(record, "superseded_at", open_ended=True)
+    if require_recorded and recorded is _MISSING:
         raise TemporalValidationError("Managed evidence requires recorded_at")
     window = Window(
-        timestamp(start, "valid_from") if start is not None else _BEGINNING,
-        _end(record.get("valid_until"), "valid_until"),
-        timestamp(recorded, "recorded_at") if recorded is not None else _BEGINNING,
-        _end(record.get("superseded_at"), "superseded_at"),
+        _BEGINNING if start is _MISSING else start,
+        None if until is _MISSING else until,
+        _BEGINNING if recorded is _MISSING else recorded,
+        None if superseded is _MISSING else superseded,
     )
     for lower, upper in (
         (window.valid_from, window.valid_until),
@@ -143,6 +168,21 @@ def _window(record: Dict[str, Any], *, require_recorded: bool) -> Window:
         if upper is not None and upper <= lower:
             raise TemporalValidationError("Temporal intervals must have start < end")
     return window
+
+
+def _endpoint(relationship: Dict[str, Any], field: str) -> str:
+    """Resolve an endpoint from the short key or the canonical exported key.
+
+    ``ContextGraph.to_kg_dict()`` emits ``source_id`` and ``target_id``, while
+    hand-written graphs commonly use ``source`` and ``target``. Both are
+    accepted; supplying both with different values is rejected rather than
+    silently resolved by precedence.
+    """
+    short = relationship.get(field)
+    canonical = relationship.get(f"{field}_id")
+    if short is not None and canonical is not None and short != canonical:
+        raise ValidationError(f"Conflicting {field} and {field}_id values")
+    return _identifier(short if short is not None else canonical, field)
 
 
 def normalize_graph(graph: Dict[str, Any]) -> Projection:
@@ -179,8 +219,8 @@ def normalize_graph(graph: Dict[str, Any]) -> Projection:
         if support_id in projection.evidence:
             raise ValidationError(f"Duplicate support_id: {support_id}")
         support = FactSupport(support_id, validate_fact_text(annotation["fact"]))
-        source = _identifier(relationship.get("source"), "source")
-        target = _identifier(relationship.get("target"), "target")
+        source = _endpoint(relationship, "source")
+        target = _endpoint(relationship, "target")
         if projection.entities and (
             source not in projection.entities or target not in projection.entities
         ):
