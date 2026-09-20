@@ -226,7 +226,7 @@ class ContextRetriever:
             use_graph_expansion: Use graph expansion (overrides config)
             min_relevance_score: Minimum relevance score
             mode: Retrieval mode ('local', 'global', 'drift', 'hybrid')
-            truth_filter: Optional truth-maintenance filter; when set, all
+            truth_filter: Optional truth-maintenance filter for local mode only;
                 candidates are validated against a session snapshot before
                 ranking and the snapshot version is re-checked before
                 results are returned
@@ -239,6 +239,15 @@ class ContextRetriever:
             List of retrieved context items
         """
         norm_mode = str(mode).lower().strip()
+        if truth_filter is not None and norm_mode != "local":
+            raise ValidationError(
+                "truth_filter is supported only with mode='local'; "
+                "other retrieval modes do not validate truth dependencies",
+                validation_context={
+                    "method": "ContextRetriever.retrieve",
+                    "mode": norm_mode,
+                },
+            )
         if norm_mode == "global":
             return self.retrieve_global(
                 query,

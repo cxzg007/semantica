@@ -51,7 +51,8 @@ def make_gate(session):
     return TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
 
 
-def test_invalid_candidate_is_removed_before_top_k():
+@pytest.mark.parametrize("mode", ["local", " LOCAL "])
+def test_invalid_candidate_is_removed_before_top_k(mode):
     session = make_session()
     session.apply(assertions=[FactSupport("live", "Current(x)")])
     store = StaticVectorStore([
@@ -60,13 +61,34 @@ def test_invalid_candidate_is_removed_before_top_k():
     ])
     gate = make_gate(session)
     retriever = ContextRetriever(vector_store=store, use_graph_expansion=False)
-    result = retriever.retrieve("assertion", max_results=1, truth_filter=gate)
+    result = retriever.retrieve(
+        "assertion", max_results=1, truth_filter=gate, mode=mode
+    )
     assert [r.content for r in result] == ["current assertion"]
     assert len(store.rows) == 2
     assert (
         result[0].metadata["truth_maintenance_validation"]["version"]
         == session.version
     )
+
+
+@pytest.mark.parametrize("mode", ["global", "drift", "hybrid", " GLOBAL "])
+def test_nonlocal_modes_reject_truth_filter_before_retrieval(mode, monkeypatch):
+    store = StaticVectorStore([])
+    retriever = ContextRetriever(vector_store=store, use_graph_expansion=False)
+    gate = make_gate(make_session())
+    backend_calls = []
+
+    def unvalidated_backend(*args, **kwargs):
+        backend_calls.append(kwargs)
+        return [RetrievedContext(content="unsupported claim", score=1.0)]
+
+    monkeypatch.setattr(retriever, "retrieve_global", unvalidated_backend)
+    monkeypatch.setattr(retriever, "retrieve_drift", unvalidated_backend)
+    with pytest.raises(ValidationError, match="truth_filter.*local"):
+        retriever.retrieve("assertion", mode=mode, truth_filter=gate)
+    assert backend_calls == []
+    assert store.calls == 0
 
 
 def test_duplicate_text_prefixes_are_both_kept():

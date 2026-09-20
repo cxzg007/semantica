@@ -978,6 +978,12 @@ while silently dropping a stale attachment.
 
 ### Unsupported entry points
 
+The filter is supported only by `ContextRetriever.retrieve(mode="local", ...)`
+(the default mode) and delegates that use that path. Passing `truth_filter` to
+`retrieve` with `mode="global"`, `"drift"`, or `"hybrid"` raises `ValidationError`
+before retrieval starts. Those modes and direct `retrieve_global` /
+`retrieve_drift` calls are outside the dependency-validation guarantee.
+
 `truth_filter` is intentionally **not** accepted on `AgentContext.retrieve`,
 `AgentContext.query_with_reasoning`, or `ContextRetriever.query_with_reasoning`
 — passing it there raises `ValidationError` immediately. Assemble the
