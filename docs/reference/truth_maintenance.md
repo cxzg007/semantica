@@ -137,5 +137,6 @@ Returned snapshots (`MaintenanceDelta`, `FactExplanation`, `Derivation`) are fro
 
 ## Links
 
+- [Temporal Truth Maintenance](/reference/temporal_truth_maintenance) — an opt-in graph adapter for independent valid/known-time slices, expiration and late corrections.
 - [Reasoning](/reference/reasoning) — the rule engines this session builds on, including the `Rule` representation.
 - [Ontology](/reference/ontology) — ontology axioms and SHACL constraints.
