@@ -155,6 +155,7 @@ from .global_retriever import (
     MapResponseSchema,
 )
 from .graph_schema import get_schema_info, setup_decision_schema, verify_schema
+from .grounded_context import GroundedContextAssembler
 from .grounded_context_types import (
     ArtifactInvalidationReport,
     ArtifactRegistrySnapshot,
@@ -197,6 +198,7 @@ __all__ = [
     "TemporalGraphRetriever",
     "TruthMaintenanceContextFilter",
     # Grounded context consistency
+    "GroundedContextAssembler",
     "TruthSnapshotProvider",
     "SnapshotStamp",
     "ContextReadView",
