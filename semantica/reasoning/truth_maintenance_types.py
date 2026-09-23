@@ -14,6 +14,7 @@ __all__ = [
     "FactExplanation",
     "FactSupport",
     "MaintenanceDelta",
+    "TruthMaintenanceSnapshot",
 ]
 
 
@@ -54,6 +55,20 @@ class MaintenanceDelta:
     removed_facts: FrozenSet[str]
     added_supports: Tuple[FactSupport, ...]
     removed_supports: Tuple[FactSupport, ...]
+
+
+@dataclass(frozen=True)
+class TruthMaintenanceSnapshot:
+    """Immutable, detached view of one committed session state.
+
+    Returned by :meth:`TruthMaintenanceSession.snapshot`.  The collections
+    and support records are copies detached from live session state, so
+    later ``apply`` batches never change an existing snapshot.
+    """
+
+    version: int
+    facts: FrozenSet[str]
+    active_supports: Tuple[FactSupport, ...]
 
 
 @dataclass(frozen=True)

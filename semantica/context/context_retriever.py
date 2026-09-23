@@ -88,6 +88,8 @@ from ..kg.path_finder import PathFinder
 from ..kg.centrality_calculator import CentralityCalculator
 from ..kg.community_detector import CommunityDetector
 from ..kg.similarity_calculator import SimilarityCalculator
+from ..utils.exceptions import ValidationError
+from .truth_maintenance_filter import TruthMaintenanceContextFilter
 try:
     from ..kg.temporal_query import TemporalGraphQuery as _TemporalGraphQuery
     from ..kg.temporal_model import parse_temporal_value as _parse_temporal_value
@@ -212,6 +214,7 @@ class ContextRetriever:
         use_graph_expansion: Optional[bool] = None,
         min_relevance_score: float = 0.0,
         mode: str = "local",
+        truth_filter: Optional[TruthMaintenanceContextFilter] = None,
         **options,
     ) -> List[RetrievedContext]:
         """
@@ -223,6 +226,10 @@ class ContextRetriever:
             use_graph_expansion: Use graph expansion (overrides config)
             min_relevance_score: Minimum relevance score
             mode: Retrieval mode ('local', 'global', 'drift', 'hybrid')
+            truth_filter: Optional truth-maintenance filter for local mode only;
+                candidates are validated against a session snapshot before
+                ranking and the snapshot version is re-checked before
+                results are returned
             **options: Additional options:
                 - entity_ids: Filter by entity IDs
                 - node_types: Filter by node types
@@ -232,6 +239,15 @@ class ContextRetriever:
             List of retrieved context items
         """
         norm_mode = str(mode).lower().strip()
+        if truth_filter is not None and norm_mode != "local":
+            raise ValidationError(
+                "truth_filter is supported only with mode='local'; "
+                "other retrieval modes do not validate truth dependencies",
+                validation_context={
+                    "method": "ContextRetriever.retrieve",
+                    "mode": norm_mode,
+                },
+            )
         if norm_mode == "global":
             return self.retrieve_global(
                 query,
@@ -287,6 +303,18 @@ class ContextRetriever:
         )
 
         try:
+            if truth_filter is not None and not isinstance(
+                truth_filter, TruthMaintenanceContextFilter
+            ):
+                raise ValidationError(
+                    "truth_filter must be a TruthMaintenanceContextFilter "
+                    "instance",
+                    validation_context={"method": "ContextRetriever.retrieve"},
+                )
+            snapshot = (
+                truth_filter.snapshot() if truth_filter is not None else None
+            )
+
             use_expansion = (
                 use_graph_expansion
                 if use_graph_expansion is not None
@@ -329,7 +357,13 @@ class ContextRetriever:
             self.progress_tracker.update_tracking(
                 tracking_id, message="Ranking and merging results..."
             )
-            ranked_results = self._rank_and_merge(all_results, query)
+            if snapshot is not None:
+                all_results = truth_filter.filter_contexts(
+                    all_results, snapshot=snapshot
+                )
+            ranked_results = self._rank_and_merge(
+                all_results, query, merge_duplicates=snapshot is None
+            )
 
             # Filter by minimum score
             eff_min_score = (
@@ -340,6 +374,9 @@ class ContextRetriever:
             filtered_results = [
                 r for r in ranked_results if r.score >= eff_min_score
             ]
+
+            if snapshot is not None:
+                truth_filter.assert_current(snapshot)
 
             self.progress_tracker.stop_tracking(
                 tracking_id,
@@ -562,8 +599,10 @@ class ContextRetriever:
                         content = res.get("content") or res.get("node", {}).get(
                             "content"
                         )
-                        metadata = res.get("metadata") or res.get("node", {}).get(
-                            "metadata"
+                        metadata = (
+                            res.get("metadata")
+                            or res.get("node", {}).get("metadata")
+                            or res.get("node", {}).get("properties")
                         )
 
                     score = res.get("score", 0.0)
@@ -763,6 +802,12 @@ class ContextRetriever:
                                     related_entities.append(e)
                                     break
                     
+                    # Cap relationship attachments before rendering prose so the
+                    # validated bundle and the rendered content stay aligned: the
+                    # filter only sees the first 10 relationships, so the prose
+                    # must describe no more than those 10.
+                    related_relationships = related_relationships[:10]
+
                     # Generate comprehensive content from entity and relationships
                     entity_display = entity.get('name', entity_id)
                     
@@ -876,7 +921,7 @@ class ContextRetriever:
                                 **entity.get("metadata", {}),
                             },
                             related_entities=related_entities[:10],  # Limit entities
-                            related_relationships=related_relationships[:10],  # Limit relationships
+                            related_relationships=related_relationships,  # Already capped above
                         )
                     )
 
@@ -949,7 +994,11 @@ class ContextRetriever:
             return []
 
     def _rank_and_merge(
-        self, results: List[RetrievedContext], query: str
+        self,
+        results: List[RetrievedContext],
+        query: str,
+        *,
+        merge_duplicates: bool = True,
     ) -> List[RetrievedContext]:
         """Rank and merge results from multiple sources with GraphRAG optimization."""
         def is_graph_source(s: Optional[str]) -> bool:
@@ -1037,7 +1086,7 @@ class ContextRetriever:
         
         all_results = vector_results + graph_results + memory_results + other_results
         
-        for result in all_results:
+        for result in (all_results if merge_duplicates else []):
             # For graph results, deduplicate by entity ID
             if is_graph_source(result.source):
                 entity_id = result.metadata.get("node_id")
@@ -1085,13 +1134,18 @@ class ContextRetriever:
                 existing.metadata.update(result.metadata)
         
         # Combine deduplicated results
-        merged_results = list(seen_entities.values()) + [
-            r for r in seen_content.values()
-            if (
-                not is_graph_source(r.source)
-                or r.metadata.get("node_id") not in seen_entities
-            )
-        ]
+        if merge_duplicates:
+            merged_results = list(seen_entities.values()) + [
+                r for r in seen_content.values()
+                if (
+                    not is_graph_source(r.source)
+                    or r.metadata.get("node_id") not in seen_entities
+                )
+            ]
+        else:
+            # Grounded retrieval: every validated candidate is kept; merging
+            # could mix provenance across rows that reference the same node.
+            merged_results = list(all_results)
         
         # Re-rank with query relevance boost
         if self.vector_store and hasattr(self.vector_store, 'embed'):
@@ -1225,6 +1279,8 @@ class ContextRetriever:
                                             "id": target_id,
                                             "type": node.get("type"),
                                             "content": node.get("content"),
+                                            "metadata": node.get("metadata")
+                                            or node.get("properties"),
                                             "relationship": edge.get("type"),
                                             "hop": hop + 1,
                                         }
@@ -1243,6 +1299,8 @@ class ContextRetriever:
                                             "id": source_id,
                                             "type": node.get("type"),
                                             "content": node.get("content"),
+                                            "metadata": node.get("metadata")
+                                            or node.get("properties"),
                                             "relationship": edge.get("type"),
                                             "hop": hop + 1,
                                         }
@@ -1773,7 +1831,8 @@ Answer:"""
                 ``{at_time}`` and ``{source}`` placeholders are substituted;
                 any other braces are left as-is.  Defaults to
                 ``"[Graph context valid as of: {at_time} UTC | Source: {source}]"``.
-            **kwargs: Additional retrieval options passed to ``retrieve()``
+            **kwargs: Additional retrieval options passed to ``retrieve()``; ``truth_filter`` is
+                rejected here, use ``retrieve()`` directly instead
 
         Returns:
             Dictionary with:
@@ -1792,6 +1851,15 @@ Answer:"""
             ... )
             >>> print(result['response'])
         """
+        if kwargs.get("truth_filter") is not None:
+            raise ValidationError(
+                "truth_filter is not supported on query_with_reasoning; use "
+                "ContextRetriever.retrieve(..., truth_filter=...) directly and "
+                "assemble the verified context before reasoning",
+                validation_context={
+                    "method": "ContextRetriever.query_with_reasoning"
+                },
+            )
         tracking_id = self.progress_tracker.start_tracking(
             file=None,
             module="context",

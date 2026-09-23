@@ -28,6 +28,7 @@ from .truth_maintenance_types import (
     FactExplanation,
     FactSupport,
     MaintenanceDelta,
+    TruthMaintenanceSnapshot,
 )
 
 __all__ = ["TruthMaintenanceSession"]
@@ -172,6 +173,25 @@ class TruthMaintenanceSession:
     def version(self) -> int:
         """Monotonic commit counter; unchanged for net-zero updates."""
         return self._version
+
+    def snapshot(self) -> TruthMaintenanceSnapshot:
+        """Return an immutable, detached view of the current committed state.
+
+        The snapshot is a full copy: later ``apply`` batches never change an
+        existing snapshot.  Reading it obeys the same caller-serialized
+        access contract as the rest of the session API.
+        """
+        state = self._state
+        return TruthMaintenanceSnapshot(
+            version=self._version,
+            facts=frozenset(state.active_facts),
+            active_supports=tuple(
+                sorted(
+                    state.active_supports.values(),
+                    key=lambda support: support.support_id,
+                )
+            ),
+        )
 
     def explain(self, fact: str) -> FactExplanation:
         """Explain one fact: explicit supports plus retained derivations."""

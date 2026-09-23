@@ -240,6 +240,10 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "SAPIngestor": (".sap_ingestor", "SAPIngestor"),
     "SAPODataEntity": (".sap_ingestor", "SAPODataEntity"),
     "SAPODataConnector": (".sap_ingestor", "SAPODataConnector"),
+    # Apache Airflow ingestion
+    "AirflowIngestor": (".airflow_ingestor", "AirflowIngestor"),
+    "AirflowData": (".airflow_ingestor", "AirflowData"),
+    "AirflowConnector": (".airflow_ingestor", "AirflowConnector"),
     # Databricks ingestion
     "DatabricksIngestor": (".databricks_ingestor", "DatabricksIngestor"),
     "DatabricksData": (".databricks_ingestor", "DatabricksData"),
@@ -269,6 +273,10 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "BigQueryIngestor": (".bigquery_ingestor", "BigQueryIngestor"),
     "BigQueryData": (".bigquery_ingestor", "BigQueryData"),
     "BigQueryConnector": (".bigquery_ingestor", "BigQueryConnector"),
+    # Looker ingestion
+    "LookerIngestor": (".looker_ingestor", "LookerIngestor"),
+    "LookerData": (".looker_ingestor", "LookerData"),
+    "LookerConnector": (".looker_ingestor", "LookerConnector"),
 }
 
 _OPTIONAL_DEPENDENCY_MESSAGES = {
@@ -311,6 +319,11 @@ _OPTIONAL_DEPENDENCY_MESSAGES = {
         "Salesforce ingestion requires optional dependency 'simple-salesforce'. "
         "Install it with: pip install 'semantica[db-salesforce]'"
     ),
+    ".airflow_ingestor": (
+        "Apache Airflow ingestion requires optional dependency 'requests'. "
+        "Install it with: "
+        "pip install \"semantica[ingest-airflow]\""
+    ),
     ".redshift_ingestor": (
         "Redshift ingestion requires optional dependency 'redshift-connector'. "
         "Install it with: pip install 'semantica[db-redshift]'"
@@ -318,6 +331,10 @@ _OPTIONAL_DEPENDENCY_MESSAGES = {
     ".bigquery_ingestor": (
         "BigQuery ingestion requires optional dependency 'google-cloud-bigquery'. "
         "Install it with: pip install 'semantica[db-bigquery]'"
+    ),
+    ".looker_ingestor": (
+        "Looker ingestion requires optional dependency 'looker-sdk'. "
+        "Install it with: pip install 'semantica[ingest-looker]'"
     ),
 }
 
@@ -345,6 +362,7 @@ def __getattr__(name: str) -> Any:
                     "lxml",
                     "redshift_connector",
                     "google",
+                    "looker_sdk",
                 )
             )
         ):
@@ -401,6 +419,15 @@ def __getattr__(name: str) -> Any:
         "BigQueryConnector",
     }:
         if not getattr(module, "BIGQUERY_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".looker_ingestor" and name in {
+        "LookerIngestor",
+        "LookerConnector",
+    }:
+        if not getattr(module, "LOOKER_AVAILABLE", True):
             message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
             if message:
                 raise ImportError(message)
@@ -478,6 +505,10 @@ __all__ = [
     "SAPIngestor",
     "SAPODataEntity",
     "SAPODataConnector",
+    # Apache Airflow ingestion
+    "AirflowIngestor",
+    "AirflowData",
+    "AirflowConnector",
     # Databricks ingestion
     "DatabricksIngestor",
     "DatabricksData",
@@ -507,6 +538,10 @@ __all__ = [
     "BigQueryIngestor",
     "BigQueryData",
     "BigQueryConnector",
+    # Looker ingestion
+    "LookerIngestor",
+    "LookerData",
+    "LookerConnector",
     # Registry and Methods
     "MethodRegistry",
     "method_registry",

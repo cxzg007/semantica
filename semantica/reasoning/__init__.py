@@ -52,6 +52,7 @@ from .truth_maintenance_types import (
     FactExplanation,
     FactSupport,
     MaintenanceDelta,
+    TruthMaintenanceSnapshot,
 )
 
 __all__ = [
@@ -91,6 +92,7 @@ __all__ = [
     "Derivation",
     "FactExplanation",
     "MaintenanceDelta",
+    "TruthMaintenanceSnapshot",
     # Temporal truth maintenance
     "TemporalTruthMaintenanceAdapter",
     "TemporalFactSnapshot",

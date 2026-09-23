@@ -45,6 +45,25 @@ if TYPE_CHECKING:
 
 console = Console()
 
+# Supported interpreter range: ``requires-python = ">=3.10,<3.14"`` in
+# pyproject.toml. tests/test_python_support_policy.py fails if the two drift.
+MIN_PYTHON = (3, 10)
+MAX_PYTHON_EXCLUSIVE = (3, 14)
+
+
+def _python_version_check(version: Sequence[int]) -> Tuple[str, Optional[str]]:
+    """Return ``(status, hint)`` for an interpreter ``(major, minor, ...)``."""
+    supported = (
+        f"{MIN_PYTHON[0]}.{MIN_PYTHON[1]}"
+        f"-{MAX_PYTHON_EXCLUSIVE[0]}.{MAX_PYTHON_EXCLUSIVE[1] - 1}"
+    )
+    major_minor = (version[0], version[1])
+    if major_minor < MIN_PYTHON:
+        return "fail", f"upgrade to Python {supported}"
+    if major_minor >= MAX_PYTHON_EXCLUSIVE:
+        return "warn", f"Python {supported} is supported; newer versions are untested"
+    return "ok", None
+
 # ─── Visual style constants ───────────────────────────────────────────────────
 _BRAND    = "bold blue"
 _KEY      = "cyan"
@@ -869,9 +888,9 @@ def doctor(cli_ctx: CLIContext, local_json: bool, deep_embeddings: bool) -> None
 
         # Python version
         pv = sys.version_info
-        checks.append(("Python", "ok" if pv >= (3, 8) else "fail",
-                        f"{pv.major}.{pv.minor}.{pv.micro}",
-                        "upgrade to Python 3.8+" if pv < (3, 8) else None))
+        py_status, py_hint = _python_version_check(pv)
+        checks.append(("Python", py_status,
+                        f"{pv.major}.{pv.minor}.{pv.micro}", py_hint))
 
         # Semantica version
         checks.append(("semantica", "ok", __version__, None))
