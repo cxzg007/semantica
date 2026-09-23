@@ -8259,6 +8259,7 @@ all = [
     { name = "tokenizers" },
     { name = "torch" },
     { name = "transformers" },
+    { name = "typesafe-sdk" },
     { name = "umap-learn" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "watchdog" },
@@ -8382,6 +8383,9 @@ ingest-parquet = [
 ingest-sap = [
     { name = "requests" },
 ]
+ingest-servicenow = [
+    { name = "requests" },
+]
 langchain = [
     { name = "langchain-core" },
 ]
@@ -8393,6 +8397,7 @@ llm-all = [
     { name = "litellm" },
     { name = "ollama" },
     { name = "openai" },
+    { name = "typesafe-sdk" },
 ]
 llm-anthropic = [
     { name = "anthropic" },
@@ -8420,6 +8425,9 @@ llm-ollama = [
 ]
 llm-openai = [
     { name = "openai" },
+]
+llm-typesafe = [
+    { name = "typesafe-sdk" },
 ]
 media = [
     { name = "librosa", version = "0.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -8627,13 +8635,14 @@ requires-dist = [
     { name = "requests", specifier = ">=2.34.2" },
     { name = "requests", marker = "extra == 'ingest-airflow'", specifier = ">=2.28.0" },
     { name = "requests", marker = "extra == 'ingest-sap'", specifier = ">=2.28.0" },
+    { name = "requests", marker = "extra == 'ingest-servicenow'", specifier = ">=2.28.0" },
     { name = "rich", specifier = ">=12.5.0" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
     { name = "scipy", specifier = ">=1.13.1" },
     { name = "seaborn", marker = "extra == 'viz'", specifier = ">=0.13.2" },
     { name = "semantica", extras = ["db-snowflake", "db-databricks", "db-salesforce", "db-redshift", "db-bigquery", "db-arrow"], marker = "extra == 'db-all'" },
     { name = "semantica", extras = ["graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings"], marker = "extra == 'graph-all'" },
-    { name = "semantica", extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor"], marker = "extra == 'llm-all'" },
+    { name = "semantica", extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe"], marker = "extra == 'llm-all'" },
     { name = "semantica", extras = ["split-tiktoken", "split-community", "split-topic"], marker = "extra == 'split-all'" },
     { name = "semantica", extras = ["vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-faiss"], marker = "extra == 'vectorstore-all'" },
     { name = "semantica", extras = ["viz", "media", "infra", "cloud", "monitoring", "watch", "llm-all", "models-huggingface", "embeddings-local", "nlp-spacy", "documents", "ingest-git", "graph-embeddings", "split-all", "graph-all", "tripletstore-oxigraph", "vectorstore-all", "parse-docling", "parse-pdf", "ingest-parquet", "ingest-arrow", "shacl", "explorer", "agno", "langchain", "google-adk"], marker = "extra == 'all'" },
@@ -8652,13 +8661,14 @@ requires-dist = [
     { name = "torch", marker = "extra == 'models-huggingface'", specifier = ">=1.13.1" },
     { name = "tqdm", specifier = ">=4.68.3" },
     { name = "transformers", marker = "extra == 'models-huggingface'", specifier = ">=4.20.0" },
+    { name = "typesafe-sdk", marker = "python_full_version >= '3.10' and extra == 'llm-typesafe'", specifier = ">=0.7.0,<0.8.0" },
     { name = "umap-learn", marker = "extra == 'viz'", specifier = ">=0.5.12" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'explorer'", specifier = ">=0.22.0" },
     { name = "watchdog", marker = "extra == 'watch'", specifier = ">=6.0.0" },
     { name = "weaviate-client", marker = "extra == 'vectorstore-weaviate'", specifier = ">=4.0.0" },
     { name = "websockets", marker = "extra == 'explorer'", specifier = ">=15.0.1" },
 ]
-provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "db-bigquery", "ingest-looker", "ingest-parquet", "ingest-arrow", "ingest-sap", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
+provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "db-bigquery", "ingest-looker", "ingest-parquet", "ingest-arrow", "ingest-sap", "ingest-servicenow", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -9782,6 +9792,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7c/f7/68adc395201b20b872d68e975386832e8005ffeacedd43a1d837a32815be/typer-0.26.8.tar.gz", hash = "sha256:c244a6bd558886fe3f8780efb6bdd28bb9aff005a94eedebaa5cb32926fe2f7e", size = 202097, upload-time = "2026-06-26T09:22:45.705Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/87/b9fd69c92c6102a066e1b86a35243f53e70bd4c709f2a26d9f4fee4f4dc0/typer-0.26.8-py3-none-any.whl", hash = "sha256:3512ca79ac5c11113414b36e80281b872884477722440691c89d1112e321a49c", size = 122564, upload-time = "2026-06-26T09:22:44.72Z" },
+]
+
+[[package]]
+name = "typesafe-sdk"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx2" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "tenacity" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/d4/14d9a00c759c126c814f7cfc0b2a760768214cda0708a9af49577b321ee3/typesafe_sdk-0.7.1.tar.gz", hash = "sha256:495ce9d81733b4f95edcb156e95042a7ec4bfd59972a1150ffa8ce1e11f85a54", size = 23062, upload-time = "2026-09-21T15:57:53.579Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/72/7e57648d27e45260b04762dd2393a81604b516a282fc5efe94cdf90ab971/typesafe_sdk-0.7.1-py3-none-any.whl", hash = "sha256:9d04eee13b5f64bbbe6f8e96cf40e3f39ca4efc934a1f4f39490cb9a43e9d2ad", size = 36366, upload-time = "2026-09-21T15:57:52.314Z" },
 ]
 
 [[package]]

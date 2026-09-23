@@ -112,6 +112,7 @@
               "integrations/airflow",
               "integrations/redshift",
               "integrations/powerbi",
+              "integrations/servicenow",
               "integrations/looker"
             ]
           },
