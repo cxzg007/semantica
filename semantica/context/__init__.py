@@ -109,6 +109,7 @@ Production Examples:
 from .agent_context import AgentContext
 from .agent_memory import AgentMemory, MemoryItem
 from .causal_analyzer import CausalChainAnalyzer
+from .context_artifact_index import ContextArtifactIndex
 from .context_graph import ContextEdge, ContextGraph, ContextNode
 from .context_retriever import (
     ContextRetriever,
@@ -198,6 +199,7 @@ __all__ = [
     "TemporalGraphRetriever",
     "TruthMaintenanceContextFilter",
     # Grounded context consistency
+    "ContextArtifactIndex",
     "GroundedContextAssembler",
     "TruthSnapshotProvider",
     "SnapshotStamp",
