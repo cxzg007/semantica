@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from semantica.reasoning import FactSupport
+from semantica.reasoning._truth_maintenance_validation import validate_fact_text
 from semantica.utils.exceptions import ValidationError
 
 __all__ = [
@@ -83,7 +84,7 @@ def _moment(value: Any, name: str) -> datetime:
         raise ValidationError(f"{name} must be a datetime, got {type(value).__name__}")
     if value.utcoffset() is None:
         raise ValidationError(f"{name} must be timezone aware")
-    return value
+    return value.astimezone(timezone.utc)
 
 
 def _unset(value: Any, name: str, source_kind: str) -> None:
@@ -99,6 +100,10 @@ def _members(values: Any, name: str) -> tuple[Any, ...]:
 
 def _word_set(values: Any, name: str) -> frozenset[str]:
     return frozenset(_word(item, f"{name} entry") for item in _members(values, name))
+
+
+def _fact_set(values: Any, name: str) -> frozenset[str]:
+    return frozenset(validate_fact_text(item) for item in _members(values, name))
 
 
 def _word_tuple(values: Any, name: str) -> tuple[str, ...]:
@@ -149,8 +154,8 @@ class SnapshotStamp:
             return
         _unset(self.version, "version", "temporal")
         _counter(self.graph_revision, "graph_revision")
-        _moment(self.valid_at, "valid_at")
-        _moment(self.known_at, "known_at")
+        object.__setattr__(self, "valid_at", _moment(self.valid_at, "valid_at"))
+        object.__setattr__(self, "known_at", _moment(self.known_at, "known_at"))
 
 
 @dataclass(frozen=True)
@@ -172,7 +177,7 @@ class ContextReadView:
         _choice(self.read_kind, "read_kind", READ_KINDS)
         if self.read_kind == "historical" and self.stamp.source_kind != "temporal":
             raise ValidationError("historical reads require a temporal stamp")
-        object.__setattr__(self, "facts", _word_set(self.facts, "facts"))
+        object.__setattr__(self, "facts", _fact_set(self.facts, "facts"))
         object.__setattr__(
             self,
             "active_supports",
@@ -194,7 +199,7 @@ class ContextDependencies:
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "required_facts", _word_set(self.required_facts, "required_facts")
+            self, "required_facts", _fact_set(self.required_facts, "required_facts")
         )
         object.__setattr__(
             self,

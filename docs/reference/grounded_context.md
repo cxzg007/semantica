@@ -23,10 +23,13 @@ the one below it:
 | 3. Registry | `ContextArtifactIndex` | Holds immutable registered content records (`GroundedArtifact`) and reports which ones became invalid or re-eligible between two views |
 | 4. Assembly | `GroundedContextAssembler` | Retrieves candidates, re-checks every registered artifact against the captured view, applies the character budget, and renders grounded text with citations |
 
-The registry only manages content you explicitly register. Retrieval alone
-does not ground anything: a vector row is only eligible for assembly when it
-carries the annotation of a registered artifact whose declared dependencies
-still hold in the captured view.
+The registry only manages content you explicitly register. Ordinary candidates
+without `grounded_artifact_id` remain eligible under the existing
+`truth_maintenance` annotation rules: their namespace, facts, supports, and
+attachments must validate against the captured view. They retain their retrieval
+source and render without registered citation footnotes. Candidates carrying
+`grounded_artifact_id` must additionally match a registered artifact's content
+and satisfy its dependency and citation contracts; an unknown ID is excluded.
 
 ## Complete Example: Retracting a Source
 
@@ -310,8 +313,14 @@ commitment you can rely on — or a non-commitment you must not rely on:
   whose citation is invalid is itself excluded (`invalid_citation`) — a
   grounded answer never keeps its prose while silently dropping its source.
 - **Only explicitly registered content is managed.** The index never infers
-  dependencies and never annotates records on your behalf. Unregistered
-  vector rows simply do not participate in grounded assembly.
+  dependencies and never annotates records on your behalf. Ordinary candidates
+  can participate with valid annotations without being registered; candidates
+  with an unknown artifact ID cannot bypass registry validation.
+- **Value validation.** Read-view facts and artifact fact dependencies use PR1
+  ground-atom validation and canonical whitespace. Temporal stamps convert
+  timezone-aware coordinates to UTC without changing the instant; naive
+  coordinates are rejected. The provider and registry namespaces must match,
+  even when retrieval would return no candidates.
 - **Historical reads are isolated.** Assembling at a `valid_at` / `known_at`
   coordinate evaluates history and never mutates the adapter, the provider,
   or the registry. Moving the live cursor (advance) during a historical

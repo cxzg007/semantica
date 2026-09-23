@@ -108,7 +108,12 @@ class GroundedContextAssembler:
 
         view = self.provider.capture(valid_at=valid_at, known_at=known_at)
         registry = self.artifacts.snapshot()
+        if registry.namespace != view.stamp.namespace:
+            raise ValidationError(
+                "artifact registry namespace must match provider namespace"
+            )
         exclusions: list[Exclusion] = []
+        candidate_ids: dict[int, str] = {}
 
         def candidate_filter(candidates):
             kept = []
@@ -119,7 +124,9 @@ class GroundedContextAssembler:
                 if reason is None:
                     # Rank and merge mutate scores and metadata in place;
                     # never let those writes reach the external stores.
-                    kept.append(deepcopy(candidate))
+                    owned = deepcopy(candidate)
+                    candidate_ids[id(owned)] = object_id
+                    kept.append(owned)
                 else:
                     exclusions.append(Exclusion(object_id=object_id, reason=reason))
             return kept
@@ -131,18 +138,21 @@ class GroundedContextAssembler:
             merge_duplicates=False,
         )
 
-        admitted: list[GroundedArtifact] = []
+        admitted: list[GroundedArtifact | RetrievedContext] = []
         for candidate in ranked:
             if len(admitted) >= max_results:
                 break
-            artifact = registry.get(candidate.metadata["grounded_artifact_id"])
-            admitted.append(artifact)
+            artifact_id = candidate.metadata.get("grounded_artifact_id")
+            item = registry.get(artifact_id) if artifact_id is not None else candidate
+            admitted.append(item)
             blocks, citations, text = self._render(admitted, registry)
             if len(text) <= max_context_chars:
                 continue
             admitted.pop()
             exclusions.append(
-                Exclusion(object_id=artifact.artifact_id, reason="budget_exceeded")
+                Exclusion(
+                    object_id=candidate_ids[id(candidate)], reason="budget_exceeded"
+                )
             )
         blocks, citations, text = self._render(admitted, registry)
 
@@ -187,7 +197,7 @@ class GroundedContextAssembler:
         if not isinstance(metadata, dict):
             return fallback, "missing_annotation"
         if "grounded_artifact_id" not in metadata:
-            return fallback, "missing_annotation"
+            return fallback, evaluate_candidate(candidate, view=view)
         artifact_id = metadata["grounded_artifact_id"]
         if (
             not isinstance(artifact_id, str)
@@ -215,7 +225,7 @@ class GroundedContextAssembler:
 
     @staticmethod
     def _render(
-        admitted: list[GroundedArtifact],
+        admitted: list[GroundedArtifact | RetrievedContext],
         registry: ArtifactRegistrySnapshot,
     ) -> tuple[tuple[ContextBlock, ...], tuple[ContextCitation, ...], str]:
         """
@@ -232,7 +242,9 @@ class GroundedContextAssembler:
         blocks: list[ContextBlock] = []
         for index, artifact in enumerate(admitted, start=1):
             block_citation_ids: list[str] = []
-            for cited_id in artifact.citation_ids:
+            is_artifact = isinstance(artifact, GroundedArtifact)
+            citation_ids = artifact.citation_ids if is_artifact else ()
+            for cited_id in citation_ids:
                 if cited_id not in labels:
                     labels[cited_id] = f"c{len(labels) + 1}"
                     ordered_citation_ids.append(cited_id)
@@ -241,7 +253,7 @@ class GroundedContextAssembler:
                 ContextBlock(
                     block_id=f"b{index}",
                     content=artifact.content,
-                    source=artifact.artifact_id,
+                    source=artifact.artifact_id if is_artifact else artifact.source,
                     citation_ids=tuple(block_citation_ids),
                 )
             )

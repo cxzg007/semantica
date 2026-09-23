@@ -274,3 +274,81 @@ def test_assert_current_rejects_foreign_views():
         renamed.assert_current(view)
     with pytest.raises(ValidationError):
         session_provider.assert_current("not-a-read-view")
+
+
+@pytest.mark.parametrize("fact", ["NOT AN ATOM", "P(?x)", "P(a,,b)", 42])
+@pytest.mark.parametrize("target", ["dependencies", "view"])
+def test_fact_entry_points_reject_invalid_or_non_ground_atoms(fact, target):
+    from semantica.context.grounded_context_types import (
+        ContextDependencies,
+        ContextReadView,
+        SnapshotStamp,
+    )
+
+    with pytest.raises(ValidationError):
+        if target == "dependencies":
+            ContextDependencies(required_facts=[fact])
+        else:
+            ContextReadView(
+                stamp=SnapshotStamp(NAMESPACE, "session", version=0),
+                read_kind="live",
+                facts=[fact],
+                active_supports=(),
+            )
+
+
+def test_fact_entry_points_canonicalize_whitespace_and_deduplicate():
+    from semantica.context.grounded_context_types import (
+        ContextDependencies,
+        ContextReadView,
+        SnapshotStamp,
+    )
+
+    facts = ["  P( a , b )  ", "P(a,b)"]
+    dependencies = ContextDependencies(
+        required_facts=facts, required_support_ids=["source:revision-1"]
+    )
+    view = ContextReadView(
+        stamp=SnapshotStamp(NAMESPACE, "session", version=0),
+        read_kind="live",
+        facts=facts,
+        active_supports=(),
+    )
+    assert dependencies.required_facts == view.facts == frozenset({"P(a, b)"})
+    assert dependencies.required_support_ids == frozenset({"source:revision-1"})
+    with pytest.raises(FrozenInstanceError):
+        view.facts = frozenset()
+
+
+@pytest.mark.parametrize("offset_hours", [8, -5, 0])
+def test_temporal_stamp_normalizes_both_coordinates_to_utc(offset_hours):
+    from datetime import timedelta
+
+    from semantica.context.grounded_context_types import SnapshotStamp
+
+    zone = timezone(timedelta(hours=offset_hours))
+    valid = datetime(2026, 9, 15, 10, tzinfo=zone)
+    known = datetime(2026, 9, 20, 12, tzinfo=zone)
+    stamp = SnapshotStamp(
+        NAMESPACE, "temporal", graph_revision=1, valid_at=valid, known_at=known
+    )
+    assert stamp.valid_at.tzinfo is timezone.utc
+    assert stamp.known_at.tzinfo is timezone.utc
+    assert stamp.valid_at == datetime(2026, 9, 15, 10, tzinfo=timezone.utc) - timedelta(
+        hours=offset_hours
+    )
+    assert stamp.known_at == datetime(2026, 9, 20, 12, tzinfo=timezone.utc) - timedelta(
+        hours=offset_hours
+    )
+    with pytest.raises(FrozenInstanceError):
+        stamp.valid_at = valid
+
+
+@pytest.mark.parametrize("field", ["valid_at", "known_at"])
+def test_temporal_stamp_rejects_naive_coordinates(field):
+    from semantica.context.grounded_context_types import SnapshotStamp
+
+    coordinates = {"valid_at": at(15), "known_at": at(20)}
+    coordinates[field] = datetime(2026, 9, 15)
+    with pytest.raises(ValidationError, match="timezone aware"):
+        SnapshotStamp(NAMESPACE, "temporal", graph_revision=1, **coordinates)

@@ -379,3 +379,100 @@ def test_invalidated_summary_disappears_with_its_citation():
     after = builder.assemble("query")
     assert after.blocks == after.citations == ()
     assert "HR revision 1" not in after.text
+
+
+def ordinary_row(provider, *, content="Original source", score=0.9):
+    record = artifact(
+        provider.capture(),
+        "source",
+        content=content,
+        supports=("s1",),
+        policy="dependencies",
+    )
+    row = stored_row(record, score=score)
+    del row["metadata"]["grounded_artifact_id"]
+    return row
+
+
+def test_ordinary_candidate_keeps_source_without_citations_or_store_writes():
+    session, provider = session_with_provider(FactSupport("s1", "A(x)"))
+    row = ordinary_row(provider)
+    local = retriever([row])
+    builder = GroundedContextAssembler(
+        local, provider=provider, artifacts=ContextArtifactIndex(namespace=NAMESPACE)
+    )
+    result = builder.assemble("query")
+    assert result.text == "[b1] Original source"
+    assert result.blocks[0].source == "vector:source"
+    assert result.blocks[0].citation_ids == ()
+    assert result.citations == result.exclusions == ()
+    assert local.vector_store.rows == [row]
+
+
+def test_ordinary_candidate_mixes_with_registered_summary():
+    session, provider = session_with_provider(FactSupport("s1", "A(x)"))
+    index, citation, summary = registered_pair(provider)
+    builder = GroundedContextAssembler(
+        retriever([stored_row(summary, score=0.5), ordinary_row(provider)]),
+        provider=provider,
+        artifacts=index,
+    )
+    result = builder.assemble("query")
+    assert [block.source for block in result.blocks] == ["vector:source", "summary-v1"]
+    assert result.blocks[0].citation_ids == ()
+    assert result.blocks[1].citation_ids == ("cite-s1",)
+    assert result.text == (
+        "[b1] Original source\n\n[b2] A applies to x (sources: [c1])"
+        "\n\nSources:\n[c1] HR revision 1"
+    )
+
+
+def test_ordinary_support_retraction_is_filtered_before_top_k():
+    session, provider = session_with_provider(
+        FactSupport("s1", "A(x)"), FactSupport("s2", "A(x)")
+    )
+    stale = ordinary_row(provider, score=1.0)
+    current = ordinary_row(provider, content="Current source", score=0.5)
+    current["metadata"]["truth_maintenance"]["required_support_ids"] = ["s2"]
+    session.apply(retractions=["s1"])
+    builder = GroundedContextAssembler(
+        retriever([stale, current]),
+        provider=provider,
+        artifacts=ContextArtifactIndex(namespace=NAMESPACE),
+    )
+    result = builder.assemble("query", max_results=1)
+    assert result.text == "[b1] Current source"
+    assert [(e.object_id, e.reason) for e in result.exclusions] == [
+        ("candidate:1", "missing_support")
+    ]
+
+
+def test_ordinary_budget_exclusion_keeps_pre_ranking_candidate_id():
+    session, provider = session_with_provider(FactSupport("s1", "A(x)"))
+    builder = GroundedContextAssembler(
+        retriever(
+            [
+                ordinary_row(provider, content="Small", score=0.5),
+                ordinary_row(provider, content="Too long for this budget", score=1.0),
+            ]
+        ),
+        provider=provider,
+        artifacts=ContextArtifactIndex(namespace=NAMESPACE),
+    )
+    result = builder.assemble("query", max_context_chars=len("[b1] Small"))
+    assert result.text == "[b1] Small"
+    assert [(e.object_id, e.reason) for e in result.exclusions] == [
+        ("candidate:2", "budget_exceeded")
+    ]
+
+
+@pytest.mark.parametrize("with_candidates", [False, True])
+def test_mismatched_registry_namespace_fails_before_retrieval(with_candidates):
+    session, provider = session_with_provider(FactSupport("s1", "A(x)"))
+    local = retriever([ordinary_row(provider)] if with_candidates else [])
+    builder = GroundedContextAssembler(
+        local, provider=provider, artifacts=ContextArtifactIndex(namespace="other")
+    )
+    with pytest.raises(ValidationError, match="namespace"):
+        builder.assemble("query")
+    assert local.vector_store.calls == 0
