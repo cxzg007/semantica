@@ -12,7 +12,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from semantica.context.grounded_context_types import ContextReadView
+from semantica.context.grounded_context_types import (
+    ArtifactRegistrySnapshot,
+    ContextReadView,
+    GroundedArtifact,
+)
 from semantica.reasoning._truth_maintenance_validation import validate_fact_text
 from semantica.utils.exceptions import ValidationError
 
@@ -183,3 +187,71 @@ def evaluate_candidate(candidate: Any, *, view: ContextReadView) -> str | None:
     if not required_supports.issubset(active_ids):
         return "missing_support"
     return None
+
+
+def _artifact_reason(
+    artifact: GroundedArtifact,
+    *,
+    registry: ArtifactRegistrySnapshot,
+    view: ContextReadView,
+) -> str | None:
+    """Return the exclusion reason for a registered artifact on ``view``."""
+
+    stamp = view.stamp
+    if (
+        artifact.built_from.namespace != stamp.namespace
+        or artifact.built_from.source_kind != stamp.source_kind
+    ):
+        return "wrong_namespace"
+    if not artifact.dependencies.required_facts.issubset(view.facts):
+        return "missing_fact"
+    if not artifact.dependencies.required_support_ids.issubset(view.support_ids):
+        return "missing_support"
+    if artifact.validity_policy == "snapshot" and artifact.built_from != stamp:
+        return "snapshot_mismatch"
+    for cited_id in artifact.citation_ids:
+        cited = registry.get(cited_id)
+        if cited is None:
+            return "invalid_citation"
+        if _artifact_reason(cited, registry=registry, view=view) is not None:
+            return "invalid_citation"
+    return None
+
+
+def evaluate_artifact(
+    artifact_id: str,
+    *,
+    registry: ArtifactRegistrySnapshot,
+    view: ContextReadView,
+) -> str | None:
+    """Return the exclusion reason for a registered artifact against ``view``.
+
+    ``None`` means the artifact is available on the given read view. The
+    evaluation is pure: it never consults any cached eligibility and re-derives
+    the verdict from the registry content and the view alone. Caller mistakes
+    (bad identifier, wrong container types) raise ``ValidationError``.
+    """
+
+    if (
+        not isinstance(artifact_id, str)
+        or not artifact_id
+        or artifact_id.strip() != artifact_id
+    ):
+        raise ValidationError(
+            "artifact_id must be a non-empty string without surrounding " "whitespace",
+            validation_context={"artifact_id": artifact_id},
+        )
+    if not isinstance(registry, ArtifactRegistrySnapshot):
+        raise ValidationError(
+            "registry must be an ArtifactRegistrySnapshot instance",
+            validation_context={"registry_type": type(registry).__name__},
+        )
+    if not isinstance(view, ContextReadView):
+        raise ValidationError(
+            "view must be a ContextReadView instance",
+            validation_context={"view_type": type(view).__name__},
+        )
+    artifact = registry.get(artifact_id)
+    if artifact is None:
+        return "unknown_artifact"
+    return _artifact_reason(artifact, registry=registry, view=view)
