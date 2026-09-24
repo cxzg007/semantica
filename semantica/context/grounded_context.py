@@ -136,6 +136,7 @@ class GroundedContextAssembler:
             max_results=max_results,
             candidate_filter=candidate_filter,
             merge_duplicates=False,
+            limit_results=False,
         )
 
         admitted: list[GroundedArtifact | RetrievedContext] = []

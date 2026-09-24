@@ -11,6 +11,7 @@ asked about.
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from semantica.reasoning import (
     TemporalTruthMaintenanceAdapter,
@@ -42,6 +43,7 @@ class TruthSnapshotProvider:
                 "source must be a TruthMaintenanceSession or a "
                 f"TemporalTruthMaintenanceAdapter, got {type(source).__name__}"
             )
+        self._provider_id = uuid4().hex
         self._source = source
         self._namespace = namespace
         self._source_kind = (
@@ -109,6 +111,8 @@ class TruthSnapshotProvider:
                 f"view source_kind {view.stamp.source_kind!r} does not match "
                 f"provider source_kind {self._source_kind!r}"
             )
+        if view.stamp.provider_id != self._provider_id:
+            raise ValidationError("view belongs to a different provider instance")
         if self._source_kind == "session":
             if view.stamp.version != self._source.version:
                 raise ProcessingError(
@@ -143,6 +147,7 @@ class TruthSnapshotProvider:
         state = self._source.snapshot()
         stamp = SnapshotStamp(
             namespace=self._namespace,
+            provider_id=self._provider_id,
             source_kind="session",
             version=state.version,
         )
@@ -156,6 +161,7 @@ class TruthSnapshotProvider:
     def _view_from_temporal(self, snapshot: Any, read_kind: str) -> ContextReadView:
         stamp = SnapshotStamp(
             namespace=self._namespace,
+            provider_id=self._provider_id,
             source_kind="temporal",
             graph_revision=snapshot.graph_revision,
             valid_at=snapshot.valid_at,

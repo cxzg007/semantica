@@ -142,9 +142,12 @@ class SnapshotStamp:
     graph_revision: int | None = None
     valid_at: datetime | None = None
     known_at: datetime | None = None
+    provider_id: str | None = None
 
     def __post_init__(self) -> None:
         _word(self.namespace, "namespace")
+        if self.provider_id is not None:
+            _word(self.provider_id, "provider_id")
         _choice(self.source_kind, "source_kind", SOURCE_KINDS)
         if self.source_kind == "session":
             _counter(self.version, "version")

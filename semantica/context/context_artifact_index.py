@@ -198,7 +198,9 @@ class ContextArtifactIndex:
                 affected.update(self._fact_index.get(fact, ()))
             for support_id in old_view.support_ids ^ view.support_ids:
                 affected.update(self._support_index.get(support_id, ()))
-            if old_view.stamp != view.stamp:
+            if old_view.stamp.source_kind != view.stamp.source_kind:
+                affected.update(self._artifacts)
+            elif old_view.stamp != view.stamp:
                 affected.update(self._snapshot_ids)
         for artifact_id in tuple(affected):
             affected.update(self._citation_users.get(artifact_id, ()))

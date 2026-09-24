@@ -303,11 +303,18 @@ commitment you can rely on — or a non-commitment you must not rely on:
   namespace it was stamped from. Recreating a session under a new namespace
   (or a new session ID) starts a fresh incarnation: artifacts stamped from
   the old one never become valid again in the new one.
+- **Provider instance identity.** Captured stamps include an opaque `provider_id`.
+  `assert_current` rejects views from another provider instance, even when
+  both providers wrap the same source and all counters match. Hand-built
+  stamps may omit the identity for pure value validation, but cannot pass
+  provider freshness checks. This identity is not an authentication token.
 - **Snapshot policy is sensitive to anything new.** A `dependencies`-policy
-  artifact stays valid as long as its declared facts and supports hold. A
+  artifact stays valid as long as its namespace, source kind, declared facts
+  and supports match. Switching source kind re-evaluates every registered
+  artifact, even when facts and support IDs are unchanged. A
   `snapshot`-policy artifact additionally requires the view stamp to be the
   one it was built from, so any new session version — even one that keeps
-  every fact — invalidates it.
+  every fact — or a different provider instance invalidates it.
 - **Citation constraints.** A citation must use the `dependencies` policy and
   must declare a support ID; it may not reference other artifacts. A summary
   whose citation is invalid is itself excluded (`invalid_citation`) — a
@@ -328,7 +335,10 @@ commitment you can rely on — or a non-commitment you must not rely on:
   `ProcessingError` rather than returning a mixed-version answer.
 - **Character budget.** Assembly selects content greedily within the
   configured budget; over-budget blocks are excluded and reported, not
-  truncated mid-sentence.
+  truncated mid-sentence. It continues through the ranked, threshold-filtered
+  candidate pool already collected, without a pre-budget top-k cut. Source
+  collection remains bounded; at most `max_results` blocks are emitted.
+  Ordinary retrieval retains its default top-k behavior.
 - **Freshness ends at return.** A returned bundle is a snapshot of the view
   it was assembled from. It does not expire, and it does not track later
   retractions; call `assemble` again for the current answer.

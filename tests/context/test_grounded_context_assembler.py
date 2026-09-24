@@ -259,7 +259,8 @@ def test_exact_budget_boundary_is_accepted():
     assert len(result.blocks) == 1
 
 
-def test_oversized_block_is_skipped_and_smaller_blocks_still_fit():
+@pytest.mark.parametrize("max_results", [1, 5])
+def test_oversized_block_is_skipped_and_smaller_blocks_still_fit(max_results):
     session, provider = session_with_provider(
         FactSupport("s1", "A(x)"), FactSupport("s2", "B(y)")
     )
@@ -277,7 +278,7 @@ def test_oversized_block_is_skipped_and_smaller_blocks_still_fit():
     builder = GroundedContextAssembler(
         retriever(rows), provider=provider, artifacts=index
     )
-    result = builder.assemble("query", max_context_chars=30)
+    result = builder.assemble("query", max_results=max_results, max_context_chars=30)
     assert [block.content for block in result.blocks] == [small.content]
     assert (big.artifact_id, "budget_exceeded") in [
         (e.object_id, e.reason) for e in result.exclusions
@@ -459,7 +460,9 @@ def test_ordinary_budget_exclusion_keeps_pre_ranking_candidate_id():
         provider=provider,
         artifacts=ContextArtifactIndex(namespace=NAMESPACE),
     )
-    result = builder.assemble("query", max_context_chars=len("[b1] Small"))
+    result = builder.assemble(
+        "query", max_results=1, max_context_chars=len("[b1] Small")
+    )
     assert result.text == "[b1] Small"
     assert [(e.object_id, e.reason) for e in result.exclusions] == [
         ("candidate:2", "budget_exceeded")

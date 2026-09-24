@@ -12,6 +12,7 @@ import random
 
 from semantica.context import ContextArtifactIndex, TruthSnapshotProvider
 from semantica.reasoning import FactSupport, TruthMaintenanceSession
+
 from tests.context.grounded_helpers import artifact
 
 NAMESPACE = "differential-rag"
@@ -207,3 +208,85 @@ def test_incremental_reconcile_matches_a_full_recompute_oracle():
                 harness.step()
             except AssertionError as exc:
                 raise AssertionError(f"seed={seed} batch={batch}: {exc}") from exc
+
+
+def test_same_source_provider_switch_matches_full_recompute_by_policy():
+    harness = Harness(random.Random(0))
+    original_view = harness.provider.capture()
+    other_view = TruthSnapshotProvider(harness.session, namespace=NAMESPACE).capture()
+    assert original_view.facts == other_view.facts
+    assert original_view.support_ids == other_view.support_ids
+    assert original_view.stamp.version == other_view.stamp.version
+    assert original_view.stamp.provider_id != other_view.stamp.provider_id
+    registry = harness.index.snapshot()
+    baseline = full_validity(registry, original_view)
+    assert all(baseline.values())
+    harness.index.reconcile(original_view)
+
+    for view in (other_view, original_view, other_view):
+        expected = full_validity(registry, view)
+        assert expected["pinned-a"] == (view is original_view)
+        assert all(valid for key, valid in expected.items() if key != "pinned-a")
+        report = harness.index.reconcile(view)
+        assert report.invalidated_ids == tuple(
+            sorted(key for key in expected if baseline[key] and not expected[key])
+        )
+        assert report.reactivated_ids == tuple(
+            sorted(key for key in expected if not baseline[key] and expected[key])
+        )
+        repeat = harness.index.reconcile(view)
+        assert repeat.invalidated_ids == ()
+        assert repeat.reactivated_ids == ()
+        baseline = expected
+
+
+def test_source_kind_transitions_match_full_recompute_with_identical_dependencies():
+    from datetime import datetime, timezone
+
+    from semantica.reasoning import TemporalTruthMaintenanceAdapter
+
+    harness = Harness(random.Random(0))
+    session_view = harness.provider.capture()
+    moment = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    adapter = TemporalTruthMaintenanceAdapter(rules=[])
+    adapter.sync(
+        {
+            "entities": [{"id": "x"}, {"id": "y"}],
+            "relationships": [
+                {
+                    "source": "x",
+                    "target": "y",
+                    "type": support_id,
+                    "valid_from": moment,
+                    "recorded_at": moment,
+                    "metadata": {
+                        "truth_maintenance": {"support_id": support_id, "fact": fact}
+                    },
+                }
+                for support_id, fact in SUPPORT_FACTS.items()
+            ],
+        },
+        valid_at=moment,
+        known_at=moment,
+    )
+    temporal_view = TruthSnapshotProvider(adapter, namespace=NAMESPACE).capture()
+    assert temporal_view.facts == session_view.facts
+    assert temporal_view.support_ids == session_view.support_ids
+    registry = harness.index.snapshot()
+    baseline = full_validity(registry, session_view)
+    assert all(baseline.values())
+    harness.index.reconcile(session_view)
+
+    for view in (temporal_view, session_view, temporal_view):
+        expected = full_validity(registry, view)
+        report = harness.index.reconcile(view)
+        assert report.invalidated_ids == tuple(
+            sorted(key for key in expected if baseline[key] and not expected[key])
+        )
+        assert report.reactivated_ids == tuple(
+            sorted(key for key in expected if not baseline[key] and expected[key])
+        )
+        repeat = harness.index.reconcile(view)
+        assert repeat.invalidated_ids == ()
+        assert repeat.reactivated_ids == ()
+        baseline = expected

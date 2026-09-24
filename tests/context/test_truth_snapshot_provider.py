@@ -262,6 +262,36 @@ def test_one_temporal_coordinate_is_never_enough(coordinates):
         provider.capture(**coordinates)
 
 
+@pytest.mark.parametrize("shared_source", [False, True])
+@pytest.mark.parametrize("read_kind", ["session", "live", "historical"])
+def test_assert_current_rejects_other_provider_with_matching_counters(
+    shared_source, read_kind
+):
+    factory = supported_session if read_kind == "session" else synced_adapter
+    source = factory()
+    other_source = source if shared_source else factory()
+    provider = TruthSnapshotProvider(source, namespace=NAMESPACE)
+    other = TruthSnapshotProvider(other_source, namespace=NAMESPACE)
+    coordinates = (
+        {"valid_at": at(15), "known_at": at(15)}
+        if read_kind == "historical"
+        else {}
+    )
+    view = provider.capture(**coordinates)
+    foreign = other.capture(**coordinates)
+    assert view.facts == foreign.facts
+    assert view.stamp.version == foreign.stamp.version
+    assert view.stamp.graph_revision == foreign.stamp.graph_revision
+    assert view.stamp.valid_at == foreign.stamp.valid_at
+    assert view.stamp.known_at == foreign.stamp.known_at
+    provider.assert_current(view)
+    other.assert_current(foreign)
+    with pytest.raises(ValidationError, match="provider"):
+        provider.assert_current(foreign)
+    with pytest.raises(ValidationError, match="provider"):
+        other.assert_current(view)
+
+
 def test_assert_current_rejects_foreign_views():
     session_provider = TruthSnapshotProvider(supported_session(), namespace=NAMESPACE)
     temporal_provider = TruthSnapshotProvider(synced_adapter(), namespace=NAMESPACE)

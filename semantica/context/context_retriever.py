@@ -335,6 +335,7 @@ class ContextRetriever:
         min_relevance_score: float = 0.0,
         candidate_filter=None,
         merge_duplicates: bool = True,
+        limit_results: bool = True,
         final_check=None,
         **options,
     ) -> list[RetrievedContext]:
@@ -346,6 +347,8 @@ class ContextRetriever:
         owns tracking, source collection, ranking, thresholding and top-k
         selection. ``candidate_filter`` receives the combined candidate list
         before ranking and returns the validated candidates to keep;
+        ``limit_results=False`` leaves the bounded collected pool untruncated
+        for budget admission; source collection limits are unchanged.
         ``final_check`` runs after thresholding and before the tracker is
         stopped successfully, so a stale view still fails the tracking unit.
         """
@@ -417,13 +420,15 @@ class ContextRetriever:
             if final_check is not None:
                 final_check()
 
+            results = (
+                filtered_results[:max_results] if limit_results else filtered_results
+            )
             self.progress_tracker.stop_tracking(
                 tracking_id,
                 status="completed",
-                message=f"Retrieved {len(filtered_results[:max_results])} results",
+                message=f"Retrieved {len(results)} results",
             )
-            # Return top results
-            return filtered_results[:max_results]
+            return results
 
         except Exception as e:
             self.progress_tracker.stop_tracking(
